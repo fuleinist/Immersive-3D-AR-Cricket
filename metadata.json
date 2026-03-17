@@ -1,0 +1,8 @@
+{
+  "name": "Immersive 3D AR Cricket",
+  "description": "A 3D Augmented Reality Cricket game using MediaPipe for full-body pose tracking. Bat and bowl using your real movements, tracked via webcam, with real-time physics and Gemini-powered commentary.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
