@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "verify:tracking": "node scripts/verify-tracking-mode.mjs"
+    "verify:tracking": "node scripts/verify-tracking-mode.mjs",
+    "verify:smoothing": "node scripts/verify-pose-smoothing.mjs"
   },
   "dependencies": {
     "@google/genai": "1.37.0",

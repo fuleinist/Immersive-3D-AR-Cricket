@@ -8,6 +8,7 @@ import { FAMOUS_DELIVERIES } from './data/famousDeliveries';
 import { getCoachingTips } from './data/coaching';
 import { generateCommentary, generateCoachingInsight } from './services/geminiService';
 import { sampleFrame, detectTrackingMode, adaptSeatedLandmarks, MODE_WINDOW_FRAMES, FrameSample } from './services/trackingMode';
+import { LandmarkSmoother, IMAGE_SPACE_SMOOTHING, WORLD_SPACE_SMOOTHING } from './services/poseSmoothing';
 
 // Scripted local commentary — the default experience (Gemini is optional)
 const LOCAL_COMMENTARY: Record<ShotResult, string[]> = {
@@ -67,6 +68,12 @@ const App: React.FC = () => {
 
   const poseLandmarksRef = useRef< Landmark[] | null>(null);
 
+  // One Euro smoothers, one per landmark space. Both streams are filtered
+  // unconditionally so switching tracking modes never hits stale filter
+  // state. Lazily created on the first pose frame (~zero steady-state cost:
+  // 33x3 channels preallocated once, filtering mutates landmarks in place).
+  const smoothersRef = useRef<{ image: LandmarkSmoother; world: LandmarkSmoother } | null>(null);
+
   // Ref mirrors so handlePoseUpdate can stay identity-stable — WebcamPose
   // re-initializes the camera whenever the callback identity changes.
   const modeSamplesRef = useRef<FrameSample[]>([]);
@@ -78,6 +85,23 @@ const App: React.FC = () => {
   useEffect(() => { gameStateRef.current = gameState; }, [gameState]);
 
   const handlePoseUpdate = useCallback((results: PoseResults) => {
+    if (!smoothersRef.current) {
+      smoothersRef.current = {
+        image: new LandmarkSmoother(IMAGE_SPACE_SMOOTHING),
+        world: new LandmarkSmoother(WORLD_SPACE_SMOOTHING),
+      };
+    }
+    const smoothers = smoothersRef.current;
+
+    // Single ingestion point: de-jitter the RAW landmarks (1€ filter, in
+    // place) BEFORE anything consumes them — tracking-mode sampling, seated
+    // adaptation, avatar bones, bat orientation, shot detection. Smoothing
+    // must happen before adaptSeatedLandmarks: the adaptation anchors a
+    // synthetic lower body to the live shoulders, and filtering after the
+    // fact would fight that anchoring.
+    smoothers.image.filter(results.poseLandmarks);
+    smoothers.world.filter(results.poseWorldLandmarks);
+
     // Rolling calibration window for seated/standing detection.
     const sample = sampleFrame(results.poseLandmarks);
     if (sample) {
