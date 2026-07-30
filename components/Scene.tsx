@@ -13,7 +13,7 @@ interface SceneProps {
   stance: Stance;
   gameMode: GameMode;
   delivery: DeliveryScript;
-  onBallOutcome: (result: ShotResult, speed: number, dist: number) => void;
+  onBallOutcome: (result: ShotResult, speed: number, dist: number, contactZ?: number) => void;
   resetTrigger: number;
   avatarSize?: number;
   avatarOffset?: { x: number; y: number };
@@ -49,7 +49,9 @@ export const Scene: React.FC<SceneProps> = ({
     }
 
     const distance = (speed * speed) / 20; // Rough physics approximation for flight dist
-    onBallOutcome(result, speed, distance);
+    // pos.z is where the ball met the bat on the pitch axis — used as a
+    // shot-timing proxy by the coaching overlay (lower = further in front)
+    onBallOutcome(result, speed, distance, pos.z);
   };
 
   const handleMiss = () => {
