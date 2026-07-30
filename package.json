@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "verify:tracking": "node scripts/verify-tracking-mode.mjs"
   },
   "dependencies": {
     "@google/genai": "1.37.0",
