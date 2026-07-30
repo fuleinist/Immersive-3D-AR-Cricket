@@ -4,11 +4,12 @@ import { OneEuroFilter, OneEuroParams, alpha } from './poseSmoothing';
 /**
  * Derived-level bat smoothing.
  *
- * The bat's transform is computed from two noisy difference vectors
- * (wristDiff, forearmDir) crossed together — landmark smoothing alone
- * leaves the resulting orientation noise AMPLIFIED, which shows up as the
- * bat shaking in the player's hands. This smoother damps the bat transform
- * itself, one stage downstream of the landmark filters:
+ * The bat's transform is solved per frame from the grip forearm
+ * (services/batTransform.ts): the body frame projected perpendicular to
+ * the elbow->wrist axis. Landmark smoothing alone leaves the projected
+ * orientation noise AMPLIFIED, which shows up as the bat shaking in the
+ * player's hands. This smoother damps the bat transform itself, one
+ * stage downstream of the landmark filters:
  *
  *  - position: an independent One Euro filter per axis (adaptive, so a fast
  *    swing opens the cutoff and the bat still tracks the hands);

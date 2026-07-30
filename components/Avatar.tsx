@@ -1,9 +1,10 @@
-import React, { useRef, useMemo } from 'react';
+import React, { useRef, useMemo, useEffect } from 'react';
 import { useFrame } from '@react-three/fiber';
 import { useBox } from '@react-three/cannon';
 import * as THREE from 'three';
 import { Landmark, PoseLandmarkFrame, Stance, GameMode } from '../types';
 import { BatTransformSmoother } from '../services/batSmoothing';
+import { BatTransformSolver, type BatJoints } from '../services/batTransform';
 
 interface AvatarProps {
   landmarks: React.MutableRefObject<PoseLandmarkFrame | null>;
@@ -94,11 +95,8 @@ export const Avatar: React.FC<AvatarProps> = ({
     lKnee: new THREE.Vector3(), rKnee: new THREE.Vector3(),
     lAnkle: new THREE.Vector3(), rAnkle: new THREE.Vector3(),
     midShoulder: new THREE.Vector3(), midHip: new THREE.Vector3(),
-    midWrist: new THREE.Vector3(), wristDiff: new THREE.Vector3(),
-    forearmDir: new THREE.Vector3(), batForward: new THREE.Vector3(),
-    batToeDir: new THREE.Vector3(), batX: new THREE.Vector3(),
+    batPos: new THREE.Vector3(),
     boneDir: new THREE.Vector3(),
-    batMatrix: new THREE.Matrix4(),
     targetQuat: new THREE.Quaternion(),
     dampedPos: new THREE.Vector3(), dampedQuat: new THREE.Quaternion(),
     worldPos: new THREE.Vector3(), worldQuat: new THREE.Quaternion(),
@@ -106,10 +104,23 @@ export const Avatar: React.FC<AvatarProps> = ({
     up: new THREE.Vector3(0, 1, 0),
   }), []);
 
-  // Derived-level bat damper: smooths the computed bat transform itself
-  // (position + orientation), which landmark smoothing alone cannot steady
-  // because the orientation comes from a cross of two difference vectors.
+  // Grip-anchored bat solver + derived-level damper. The solver computes
+  // the bat transform from the scratch joints (aliases, zero churn); the
+  // smoother damps that transform itself, which landmark smoothing alone
+  // cannot steady because the perpendicular projection amplifies
+  // orientation noise.
+  const batSolver = useMemo(() => new BatTransformSolver(), []);
   const batSmoother = useMemo(() => new BatTransformSmoother(), []);
+  const batJoints = useMemo<BatJoints>(() => ({
+    lShoulder: scratch.lShoulder, rShoulder: scratch.rShoulder,
+    lElbow: scratch.lElbow, rElbow: scratch.rElbow,
+    lWrist: scratch.lWrist, rWrist: scratch.rWrist,
+    lHip: scratch.lHip, rHip: scratch.rHip,
+  }), [scratch]);
+
+  // Switching stance moves the grip to the other wrist — reset the damper
+  // so the bat snaps to the new side instead of sweeping across the body.
+  useEffect(() => { batSmoother.reset(); }, [stance, batSmoother]);
 
   const poseJoint = (key: string, pos: THREE.Vector3, radius: number) => {
     const mesh = jointsRef.current[key];
@@ -143,8 +154,7 @@ export const Avatar: React.FC<AvatarProps> = ({
     const {
       headPos, lShoulder, rShoulder, lElbow, rElbow, lWrist, rWrist,
       lHip, rHip, lKnee, rKnee, lAnkle, rAnkle, midShoulder, midHip,
-      midWrist, wristDiff, forearmDir, batForward, batToeDir, batX,
-      batMatrix, targetQuat, dampedPos, dampedQuat, worldPos, worldQuat, euler,
+      batPos, targetQuat, dampedPos, dampedQuat, worldPos, worldQuat, euler,
     } = scratch;
 
     const getPos = (idx: number, out: THREE.Vector3) => {
@@ -194,19 +204,17 @@ export const Avatar: React.FC<AvatarProps> = ({
     poseJoint('midShoulder', midShoulder, 0.06);
     poseJoint('midHip', midHip, 0.07);
 
-    midWrist.addVectors(lWrist, rWrist).multiplyScalar(0.5);
-    wristDiff.subVectors(lWrist, rWrist).normalize();
-    forearmDir.subVectors(midWrist, midShoulder).normalize();
-    batForward.crossVectors(wristDiff, forearmDir).normalize();
-    batToeDir.crossVectors(wristDiff, batForward).normalize();
-    batX.crossVectors(batToeDir, batForward).normalize();
-    batMatrix.makeBasis(batX, batToeDir, batForward);
-    targetQuat.setFromRotationMatrix(batMatrix);
-
-    // Damp the DERIVED transform (adaptive 1€ on position, slerp on
-    // orientation). Shot detection reads the same damped transform via the
-    // kinematic body below, so bat-velocity estimates inherit the damping.
-    batSmoother.filter(midWrist, targetQuat, delta, dampedPos, dampedQuat);
+    // Grip-anchored bat transform: hang the bat off the SELECTED wrist
+    // (right/left per stance), blade exactly 90° against that forearm —
+    // never the old two-wrist cross, which floated the grip between the
+    // arms and could mirror the blade toward the wrong side. Then damp the
+    // derived transform (adaptive 1€ position, slerp orientation). Shot
+    // detection reads this same damped transform via the kinematic body
+    // below, so swing physics inherits the corrected anchor and the
+    // damping. A degenerate frame keeps the last good transform.
+    if (batSolver.solve(batJoints, stance === Stance.RIGHT ? 'right' : 'left', batPos, targetQuat)) {
+      batSmoother.filter(batPos, targetQuat, delta, dampedPos, dampedQuat);
+    }
 
     if (visualBatRef.current) {
       visualBatRef.current.position.copy(dampedPos);
