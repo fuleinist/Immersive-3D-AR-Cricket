@@ -93,6 +93,19 @@ export enum CommentaryMode {
   OFF = 'OFF',
 }
 
+/**
+ * How the pose pipeline should treat the player's body.
+ * AUTO resolves to STANDING or SITTING from landmark visibility at game start.
+ */
+export enum TrackingMode {
+  STANDING = 'STANDING',
+  SITTING = 'SITTING',
+  AUTO = 'AUTO',
+}
+
+/** A concretely resolved tracking mode (never AUTO). */
+export type ResolvedTrackingMode = TrackingMode.STANDING | TrackingMode.SITTING;
+
 /** Optional AI-enriched coaching note, keyed to the delivery it belongs to. */
 export interface AiCoachingNote {
   deliveryId: string;
