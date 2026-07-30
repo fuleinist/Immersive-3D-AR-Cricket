@@ -228,7 +228,7 @@ export const Avatar: React.FC<AvatarProps> = ({
         )}
       </group>
 
-      <mesh ref={batPhysRef} name="bat" visible={false}>
+      <mesh ref={batPhysRef as any} name="bat" visible={false}>
         <boxGeometry args={[batWidth * size, batHeight * size, batDepth * size]} />
       </mesh>
     </group>

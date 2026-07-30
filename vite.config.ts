@@ -11,8 +11,9 @@ export default defineConfig(({ mode }) => {
       },
       plugins: [react()],
       define: {
-        'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
-        'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY)
+        // Gemini is optional: default to empty string so the app runs with no key set
+        'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY ?? ''),
+        'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY ?? '')
       },
       resolve: {
         alias: {
