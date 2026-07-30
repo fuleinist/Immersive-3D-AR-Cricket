@@ -1,4 +1,7 @@
-/* Global styles (referenced from index.html). Tailwind utilities come via CDN. */
+/* Tailwind utilities are compiled into the bundle at build time (v4). */
+@import "tailwindcss";
+
+/* Global styles (referenced from index.html). */
 html,
 body,
 #root {
