@@ -146,6 +146,17 @@ export const WORLD_SPACE_ARM_SMOOTHING: OneEuroParams = {
 export const UPPER_BODY_LANDMARKS: readonly number[] = [11, 12, 13, 14, 15, 16];
 
 /**
+ * The full set of landmarks the bat transform derives from: the arm chain
+ * PLUS the hips (23/24). The solver's body frame mixes shoulders with
+ * hips (bodyUp = midShoulder - midHip), and the grip anchor is the wrist —
+ * if the two ends of that relative transform run different filter
+ * profiles, their deadbands release stair-steps at different times and the
+ * bat's orientation reference wobbles even when each joint looks smooth in
+ * isolation. One shared profile keeps the whole frame in lockstep.
+ */
+export const BAT_FRAME_LANDMARKS: readonly number[] = [...UPPER_BODY_LANDMARKS, 23, 24];
+
+/**
  * Build a per-landmark params table for LandmarkSmoother: `overrideParams`
  * on the given indices, `baseParams` everywhere else.
  */

@@ -11,6 +11,7 @@
     "verify:tracking": "node scripts/verify-tracking-mode.mjs",
     "verify:smoothing": "node scripts/verify-pose-smoothing.mjs",
     "verify:bat": "node scripts/verify-bat-orientation.mjs",
+    "verify:jitter": "node scripts/verify-bat-jitter.mjs",
     "verify:lateral": "node scripts/verify-lateral-root.mjs"
   },
   "dependencies": {

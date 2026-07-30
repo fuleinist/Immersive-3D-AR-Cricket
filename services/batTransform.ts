@@ -37,8 +37,10 @@ import { alpha } from './poseSmoothing';
  * SWING AWARENESS. The body-up reference is right for stance, but a real
  * cricket swing carries the forearm horizontal/forward while the blade
  * must sweep DOWN through the ball. notePoseFrame() (called once per new
- * pose frame, never per render frame) tracks the grip-chain velocity and
- * raises `swingBlend` 0..1; solve() then rotates the blade within the
+ * pose frame, never per render frame) tracks the grip-chain velocity
+ * RELATIVE to the torso — common-mode rejection, so locomotion never
+ * reads as a swing — and raises `swingBlend` 0..1; solve() then rotates
+ * the blade within the
  * plane perpendicular to the forearm, from the stance orientation toward
  * the world-down (gravity) component of that plane. Rotating about the
  * forearm axis keeps the 90° invariant exact at any blend, and blending
@@ -78,8 +80,16 @@ export interface BatJoints {
 }
 
 /** A body reference whose |dot| with the forearm exceeds this is too
- *  parallel to project — skip it (0.95 ~= within 18°). */
+ *  parallel to project — the fallback fully owns the reference here
+ *  (0.95 ~= within 18°). */
 const PARALLEL_LIMIT = 0.95;
+/** Below this |forearm·bodyUp| the blade reference is purely body-up.
+ *  Between REF_BLEND_START and PARALLEL_LIMIT the reference blends
+ *  continuously toward the fallback, so a forearm hovering near the band
+ *  edge cannot flap the blade between two references ~90° apart on
+ *  consecutive pose frames (the old hard switch showed up as the bat
+ *  visibly shaking whenever the arm hung near-vertical). */
+const REF_BLEND_START = 0.88;
 const MIN_LEN_SQ = 1e-12;
 
 /** World gravity direction in solver space (the renderer maps both
@@ -114,6 +124,11 @@ const MAX_DT = 0.5;
 const DEFAULT_DT = 1 / 30;
 
 const clamp01 = (x: number): number => (x < 0 ? 0 : x > 1 ? 1 : x);
+/** Hermite smoothstep on [0,1]: C1-continuous at both ends. */
+const smoothstep01 = (x: number): number => {
+  const t = clamp01(x);
+  return t * t * (3 - 2 * t);
+};
 
 const isFiniteVec = (v: THREE.Vector3): boolean =>
   Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z);
@@ -132,8 +147,12 @@ export class BatTransformSolver {
   // velocity scratch and the low-passed speed/downward-speed estimates.
   private readonly prevWrist = new THREE.Vector3();
   private readonly prevElbow = new THREE.Vector3();
+  private readonly prevMidShoulder = new THREE.Vector3();
+  private readonly midShoulder = new THREE.Vector3();
   private readonly velW = new THREE.Vector3();
   private readonly velE = new THREE.Vector3();
+  private readonly velTorso = new THREE.Vector3();
+  private readonly refBlend = new THREE.Vector3();
   private readonly downPerp = new THREE.Vector3();
   private havePrev = false;
   private speedSmooth = 0;
@@ -175,27 +194,39 @@ export class BatTransformSolver {
     const right = handedness === 'right';
     const wrist = right ? joints.rWrist : joints.lWrist;
     const elbow = right ? joints.rElbow : joints.lElbow;
-    if (!isFiniteVec(wrist) || !isFiniteVec(elbow)) return;
+    const { lShoulder, rShoulder } = joints;
+    if (![wrist, elbow, lShoulder, rShoulder].every(isFiniteVec)) return;
 
     let dt = dtSeconds;
     if (!Number.isFinite(dt) || dt <= 0) dt = DEFAULT_DT;
     else if (dt < MIN_DT) dt = MIN_DT;
     else if (dt > MAX_DT) dt = MAX_DT;
 
+    const midShoulder = this.midShoulder.addVectors(lShoulder, rShoulder).multiplyScalar(0.5);
+
     if (!this.havePrev) {
       this.havePrev = true;
       this.prevWrist.copy(wrist);
       this.prevElbow.copy(elbow);
+      this.prevMidShoulder.copy(midShoulder);
       return;
     }
 
-    // Finite-difference velocity of the grip chain in solver space. The
-    // wrist is the primary swing signal; the elbow (x0.8) corroborates it
-    // so a briefly untracked wrist can't kill the phase detection.
-    const vW = this.velW.subVectors(wrist, this.prevWrist).divideScalar(dt);
-    const vE = this.velE.subVectors(elbow, this.prevElbow).divideScalar(dt);
+    // Finite-difference velocity of the grip chain in solver space,
+    // measured RELATIVE to the torso (mid-shoulder) frame. Common-mode
+    // rejection: locomotion — shuffling, stepping, bouncing between
+    // deliveries — carries the wrists with the shoulders and must not read
+    // as a swing, or the blade wobbles by blend*theta (~pi at stance)
+    // while the arm itself is steady. A real swing is exactly the motion
+    // that survives: the grip chain moving fast relative to the torso.
+    // The wrist is the primary signal; the elbow (x0.8) corroborates it so
+    // a briefly untracked wrist can't kill the phase detection.
+    const vT = this.velTorso.subVectors(midShoulder, this.prevMidShoulder).divideScalar(dt);
+    const vW = this.velW.subVectors(wrist, this.prevWrist).divideScalar(dt).sub(vT);
+    const vE = this.velE.subVectors(elbow, this.prevElbow).divideScalar(dt).sub(vT);
     this.prevWrist.copy(wrist);
     this.prevElbow.copy(elbow);
+    this.prevMidShoulder.copy(midShoulder);
 
     const speed = Math.max(vW.length(), vE.length() * 0.8);
     const down = Math.max(Math.max(0, -vW.y), Math.max(0, -vE.y) * 0.8);
@@ -269,13 +300,25 @@ export class BatTransformSolver {
     forward.normalize();
 
     // Blade axis: forearm rotated exactly 90° toward the most usable body
-    // reference. Prefer body-up (plumb bat in stance); when the forearm is
-    // too parallel (arm hanging straight down), fall back to chest-forward.
+    // reference. Prefer body-up (plumb bat in stance); as the forearm
+    // approaches parallel with it (arm hanging near-straight down), blend
+    // continuously toward the chest-forward fallback instead of switching
+    // — a hard switch flaps the blade ~90° whenever wrist noise straddles
+    // the threshold, which reads as the bat shaking in a relaxed hold.
     // Guaranteed to terminate: forward is perpendicular to up by
     // construction, so both can never be near-parallel to the forearm.
     let ref = bodyUp;
-    if (Math.abs(forearm.dot(bodyUp)) > PARALLEL_LIMIT) {
-      ref = Math.abs(forearm.dot(forward)) <= PARALLEL_LIMIT ? forward : side;
+    const upness = Math.abs(forearm.dot(bodyUp));
+    if (upness > REF_BLEND_START) {
+      const fallback = Math.abs(forearm.dot(forward)) <= PARALLEL_LIMIT ? forward : side;
+      if (upness >= PARALLEL_LIMIT) {
+        ref = fallback;
+      } else {
+        const t = smoothstep01((upness - REF_BLEND_START) / (PARALLEL_LIMIT - REF_BLEND_START));
+        ref = this.refBlend.copy(bodyUp).lerp(fallback, t);
+        if (ref.lengthSq() < MIN_LEN_SQ) return false; // unreachable: forward ⊥ up
+        ref.normalize();
+      }
     }
 
     // Gram-Schmidt: the component of `ref` perpendicular to the forearm.
