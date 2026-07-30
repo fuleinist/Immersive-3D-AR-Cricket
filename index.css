@@ -1,0 +1,6 @@
+/* Global styles (referenced from index.html). Tailwind utilities come via CDN. */
+html,
+body,
+#root {
+  overscroll-behavior: none;
+}
