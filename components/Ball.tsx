@@ -2,17 +2,17 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useSphere } from '@react-three/cannon';
 import { useFrame } from '@react-three/fiber';
 import { Vector3 } from 'three';
-import { GameState, GameMode } from '../types';
+import { GameState, DeliveryScript } from '../types';
 
 interface BallProps {
   gameState: GameState;
-  gameMode: GameMode;
+  delivery: DeliveryScript;
   onHit: (velocity: Vector3, position: Vector3) => void;
   onMiss: () => void;
   resetTrigger: number;
 }
 
-export const Ball: React.FC<BallProps> = ({ gameState, gameMode, onHit, onMiss, resetTrigger }) => {
+export const Ball: React.FC<BallProps> = ({ gameState, delivery, onHit, onMiss, resetTrigger }) => {
   // Realistic physics radius (standard cricket ball is ~0.036m radius)
   // We use a consistent radius for ball vs stumps/bat to avoid "teleporting" collisions
   const physicsRadius = 0.05; 
@@ -51,6 +51,9 @@ export const Ball: React.FC<BallProps> = ({ gameState, gameMode, onHit, onMiss, 
       } else if (e.body.name === 'stump') {
         setHasHit(true);
         onMiss(); // Bowled!
+      } else if (!pitchedRef.current) {
+        // First contact with anything else = the ball pitching on the strip
+        pitchedRef.current = true;
       }
     }
   }));
@@ -58,6 +61,8 @@ export const Ball: React.FC<BallProps> = ({ gameState, gameMode, onHit, onMiss, 
   const [hasHit, setHasHit] = useState(false);
   const [bowled, setBowled] = useState(false);
   const pos = useRef(new Vector3());
+  const vel = useRef(new Vector3());
+  const pitchedRef = useRef(false);
 
   useEffect(() => {
     const unsubscribe = api.position.subscribe((v) => pos.current.set(v[0], v[1], v[2]));
@@ -65,8 +70,14 @@ export const Ball: React.FC<BallProps> = ({ gameState, gameMode, onHit, onMiss, 
   }, [api.position]);
 
   useEffect(() => {
+    const unsubscribe = api.velocity.subscribe((v) => vel.current.set(v[0], v[1], v[2]));
+    return unsubscribe;
+  }, [api.velocity]);
+
+  useEffect(() => {
     setHasHit(false);
     setBowled(false);
+    pitchedRef.current = false;
     
     api.position.set(0, 2.2, -20);
     api.velocity.set(0, 0, 0);
@@ -78,30 +89,23 @@ export const Ball: React.FC<BallProps> = ({ gameState, gameMode, onHit, onMiss, 
         }, 1200);
         return () => clearTimeout(timer);
     }
-  }, [resetTrigger, gameState]);
+  }, [resetTrigger, gameState, delivery]);
 
   const bowl = () => {
     setBowled(true);
-    const isEasy = gameMode === GameMode.EASY;
-    
-    // Line & Length Logic: Targeting the stumps more accurately to ensure 50% hit rate
-    const zSpeed = isEasy ? 14 : 22;
-    const randomX = (Math.random() - 0.5) * (isEasy ? 0.3 : 0.7); 
-    
-    // Target bounce: We want the ball to hit the pitch before the stumps
-    const lengthFactor = isEasy ? -1.4 : -2.0;
-    
-    api.velocity.set(randomX, lengthFactor, zSpeed); 
-    
-    const rotMagnitude = isEasy ? 5 : 20;
-    api.angularVelocity.set(
-      (Math.random() - 0.5) * rotMagnitude, 
-      (Math.random() - 0.5) * rotMagnitude, 
-      (Math.random() - 0.5) * rotMagnitude
-    );
+
+    // Fully scripted: line, length, pace and spin come from the delivery script
+    api.velocity.set(delivery.line, delivery.dip, delivery.pace);
+    api.angularVelocity.set(delivery.spin[0], delivery.spin[1], delivery.spin[2]);
   };
 
-  useFrame(() => {
+  useFrame((_, delta) => {
+    // In-flight drift (swing) — applied only before the ball pitches
+    if (bowled && !hasHit && !pitchedRef.current && delivery.swing !== 0) {
+      const step = delivery.swing * Math.min(delta, 0.05);
+      api.velocity.set(vel.current.x + step, vel.current.y, vel.current.z);
+    }
+
     // Check for "Beat the bat" miss
     if (bowled && !hasHit && pos.current.z > 3.0) {
         onMiss();
@@ -114,7 +118,7 @@ export const Ball: React.FC<BallProps> = ({ gameState, gameMode, onHit, onMiss, 
   });
 
   return (
-    <mesh ref={ref} castShadow>
+    <mesh ref={ref as any} castShadow>
       <sphereGeometry args={[visualRadius, 32, 32]} />
       <meshStandardMaterial color="#b91c1c" roughness={0.3} metalness={0.2} />
     </mesh>

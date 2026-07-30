@@ -4,7 +4,7 @@ import { Physics, usePlane, useCylinder } from '@react-three/cannon';
 import { Environment, PerspectiveCamera, ContactShadows } from '@react-three/drei';
 import { Avatar } from './Avatar';
 import { Ball } from './Ball';
-import { Landmark, GameState, GameMode, ShotResult, Stance } from '../types';
+import { Landmark, GameState, GameMode, ShotResult, Stance, DeliveryScript } from '../types';
 import { Vector3, Mesh } from 'three';
 
 interface SceneProps {
@@ -12,18 +12,20 @@ interface SceneProps {
   gameState: GameState;
   stance: Stance;
   gameMode: GameMode;
+  delivery: DeliveryScript;
   onBallOutcome: (result: ShotResult, speed: number, dist: number) => void;
   resetTrigger: number;
   avatarSize?: number;
   avatarOffset?: { x: number; y: number };
 }
 
-export const Scene: React.FC<SceneProps> = ({ 
-  poseLandmarks, 
-  gameState, 
-  stance, 
-  gameMode, 
-  onBallOutcome, 
+export const Scene: React.FC<SceneProps> = ({
+  poseLandmarks,
+  gameState,
+  stance,
+  gameMode,
+  delivery,
+  onBallOutcome,
   resetTrigger,
   avatarSize = 0.8,
   avatarOffset = { x: 0, y: 0 }
@@ -54,7 +56,7 @@ export const Scene: React.FC<SceneProps> = ({
     onBallOutcome(ShotResult.OUT, 0, 0);
   };
 
-  const shouldShowAvatar = gameState === GameState.MENU || gameState === GameState.BATTING || gameState === GameState.GAME_OVER;
+  const shouldShowAvatar = gameState === GameState.MENU || gameState === GameState.BATTING || gameState === GameState.FINISHED;
 
   return (
     <Canvas shadows dpr={[1, 2]} gl={{ alpha: true }}>
@@ -75,11 +77,11 @@ export const Scene: React.FC<SceneProps> = ({
            />
         )}
         
-        <Ball 
-            gameState={gameState} 
-            gameMode={gameMode}
-            onHit={handleHit} 
-            onMiss={handleMiss} 
+        <Ball
+            gameState={gameState}
+            delivery={delivery}
+            onHit={handleHit}
+            onMiss={handleMiss}
             resetTrigger={resetTrigger}
         />
 

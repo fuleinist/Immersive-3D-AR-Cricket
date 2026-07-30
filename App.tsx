@@ -1,13 +1,45 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useCallback } from 'react';
 import { WebcamPose } from './components/WebcamPose';
 import { Scene } from './components/Scene';
-import { GameState, GameMode, Landmark, PoseResults, ShotResult, GameStats, Stance } from './types';
+import { ResultCard } from './components/ResultCard';
+import { GameState, GameMode, Landmark, PoseResults, ShotResult, GameStats, Stance, BallRecord } from './types';
+import { FAMOUS_DELIVERIES } from './data/famousDeliveries';
 import { generateCommentary } from './services/geminiService';
+
+// Scripted local commentary — the default experience (Gemini is optional)
+const LOCAL_COMMENTARY: Record<ShotResult, string[]> = {
+  [ShotResult.SIX]: [
+    "MASSIVE! That's sailed all the way!",
+    "Into the second tier! What a strike!",
+    "Clean as a whistle — SIX RUNS!",
+  ],
+  [ShotResult.FOUR]: [
+    "Crunched away for FOUR! Beautiful timing.",
+    "Finds the gap and races to the rope!",
+    "Pure class — four more.",
+  ],
+  [ShotResult.DEFENSE]: [
+    "Solid defence, right behind the line.",
+    "Dead bat. No run, no alarm.",
+    "Watchful. Very watchful.",
+  ],
+  [ShotResult.MISS]: [
+    "Beaten! No contact at all.",
+    "Swing and a miss — the crowd gasps.",
+  ],
+  [ShotResult.OUT]: [
+    "BOWLED HIM! The stumps are everywhere!",
+    "TIMBER! That's a famous dismissal!",
+    "Gone! The ball does all the talking!",
+  ],
+};
 
 const App: React.FC = () => {
   const [gameState, setGameState] = useState<GameState>(GameState.MENU);
   const [stance, setStance] = useState<Stance>(Stance.RIGHT);
   const [gameMode, setGameMode] = useState<GameMode>(GameMode.EASY);
+  const [deliveryIndex, setDeliveryIndex] = useState(0);
+  const [history, setHistory] = useState<BallRecord[]>([]);
   
   // Calibration State
   const [avatarSize, setAvatarSize] = useState<number>(0.8);
@@ -19,11 +51,10 @@ const App: React.FC = () => {
     ballsFaced: 0,
     lastShotSpeed: 0,
     lastShotDistance: 0,
-    commentary: "Welcome to AR Cricket! Select your stance and difficulty.",
+    commentary: "Face 5 of the most famous deliveries in cricket history!",
   });
   
   const [resetTrigger, setResetTrigger] = useState(0);
-  const [autoRestartCountdown, setAutoRestartCountdown] = useState<number | null>(null);
   
   const poseLandmarksRef = useRef< Landmark[] | null>(null);
 
@@ -33,66 +64,55 @@ const App: React.FC = () => {
 
   const startGame = useCallback(() => {
     setGameState(GameState.BATTING);
+    setDeliveryIndex(0);
+    setHistory([]);
     setStats({
         score: 0,
         ballsFaced: 0,
         lastShotSpeed: 0,
         lastShotDistance: 0,
-        commentary: gameMode === GameMode.EASY ? "Warm up time! Slow deliveries incoming." : "Get ready! Fast bowlers are approaching.",
+        commentary: `${FAMOUS_DELIVERIES[0].bowler} is running in… "${FAMOUS_DELIVERIES[0].name}".`,
     });
-    setAutoRestartCountdown(null);
     setResetTrigger(prev => prev + 1);
-  }, [gameMode]);
-
-  useEffect(() => {
-    let interval: number;
-    if (gameState === GameState.GAME_OVER) {
-      setAutoRestartCountdown(5);
-      interval = (window as any).setInterval(() => {
-        setAutoRestartCountdown(prev => {
-          if (prev !== null && prev > 1) return prev - 1;
-          if (prev === 1) {
-            startGame();
-          }
-          return null;
-        });
-      }, 1000);
-    } else {
-      setAutoRestartCountdown(null);
-    }
-    return () => clearInterval(interval);
-  }, [gameState, startGame]);
+  }, []);
 
   const handleBallOutcome = async (result: ShotResult, speed: number, distance: number) => {
-    let runs = 0;
-    
-    if (result === ShotResult.SIX) runs = 6;
-    else if (result === ShotResult.FOUR) runs = 4;
-    else if (result === ShotResult.DEFENSE) runs = 0;
-    else if (result === ShotResult.OUT) {
-        setGameState(GameState.GAME_OVER);
-    }
+    const delivery = FAMOUS_DELIVERIES[deliveryIndex];
+    const runs = result === ShotResult.SIX ? 6 : result === ShotResult.FOUR ? 4 : 0;
+    const isLastDelivery = deliveryIndex >= FAMOUS_DELIVERIES.length - 1;
 
-    if (result !== ShotResult.OUT) {
-        setTimeout(() => {
-            setResetTrigger(prev => prev + 1);
-        }, 4000);
-    }
+    setHistory(prev => [...prev, { delivery, result, runs, speed, distance }]);
 
+    const scripted = LOCAL_COMMENTARY[result][deliveryIndex % LOCAL_COMMENTARY[result].length];
     setStats(prev => ({
         ...prev,
-        score: prev.score + (result === ShotResult.OUT ? 0 : runs),
+        score: prev.score + runs,
         ballsFaced: prev.ballsFaced + 1,
         lastShotSpeed: speed,
         lastShotDistance: distance,
-        commentary: result === ShotResult.OUT ? "OUT! Clean bowled!" : "Shot!"
+        commentary: result === ShotResult.OUT
+          ? `${delivery.bowler} strikes — ${scripted}`
+          : scripted
     }));
 
-    if (result !== ShotResult.OUT) {
-      const aiComment = await generateCommentary(result, speed, distance);
-      setStats(prev => ({ ...prev, commentary: aiComment }));
+    // Optional AI commentary upgrade (no-op unless a Gemini key is configured)
+    generateCommentary(result, speed, distance, delivery.name)
+      .then(aiComment => {
+        if (aiComment) setStats(prev => ({ ...prev, commentary: aiComment }));
+      })
+      .catch(() => { /* AI commentary is best-effort only */ });
+
+    if (isLastDelivery) {
+        setTimeout(() => setGameState(GameState.FINISHED), 1500);
+    } else {
+        setTimeout(() => {
+            setDeliveryIndex(prev => prev + 1);
+            setResetTrigger(prev => prev + 1);
+        }, 4000);
     }
   };
+
+  const currentDelivery = FAMOUS_DELIVERIES[deliveryIndex] ?? FAMOUS_DELIVERIES[0];
 
   return (
     <div className="relative w-full h-screen bg-gray-950 overflow-hidden text-white font-sans">
@@ -104,6 +124,7 @@ const App: React.FC = () => {
             gameState={gameState} 
             stance={stance}
             gameMode={gameMode}
+            delivery={currentDelivery}
             onBallOutcome={handleBallOutcome}
             resetTrigger={resetTrigger}
             avatarSize={avatarSize}
@@ -118,10 +139,15 @@ const App: React.FC = () => {
           <div className="flex justify-between items-start w-full">
               <div className="bg-black/60 backdrop-blur-md p-4 rounded-lg border border-white/20 shadow-xl">
                   <h1 className="text-2xl font-bold text-yellow-400">AR CRICKET <span className="text-xs font-normal text-gray-400 ml-2 uppercase">[{gameMode}]</span></h1>
-                  <div className="mt-2 text-xl font-mono">Score: <span className="text-3xl text-white">{stats.score}</span> / {stats.ballsFaced}</div>
+                  <div className="mt-2 text-xl font-mono">
+                    Score: <span className="text-3xl text-white">{stats.score}</span>
+                    <span className="text-sm text-gray-400 ml-2">
+                      {history.filter(b => b.result === ShotResult.OUT).length}w · Ball {Math.min(stats.ballsFaced + 1, FAMOUS_DELIVERIES.length)}/{FAMOUS_DELIVERIES.length}
+                    </span>
+                  </div>
               </div>
               
-              {stats.lastShotSpeed > 0 && gameState !== GameState.GAME_OVER && (
+              {stats.lastShotSpeed > 0 && gameState === GameState.BATTING && (
                   <div className="bg-black/60 backdrop-blur-md p-4 rounded-lg border border-white/20 text-right animate-pulse">
                       <div className="text-xs text-gray-400 uppercase tracking-widest">Last Shot</div>
                       <div className="text-2xl font-mono text-green-400">{stats.lastShotSpeed.toFixed(1)} <span className="text-xs">km/h</span></div>
@@ -130,35 +156,25 @@ const App: React.FC = () => {
               )}
           </div>
 
-          {/* Game Over Modal */}
-          {gameState === GameState.GAME_OVER && (
-              <div className="pointer-events-auto bg-red-950/90 px-8 py-4 rounded-3xl border-2 border-red-500 text-center w-full max-w-xl animate-in fade-in slide-in-from-top-4 duration-500 shadow-[0_0_50px_rgba(239,68,68,0.3)] backdrop-blur-xl">
-                  <div className="flex items-center justify-between">
-                    <div className="text-left">
-                      <h2 className="text-4xl font-black text-white italic leading-none">WICKET!</h2>
-                      <p className="text-sm text-red-200 uppercase tracking-widest font-light mt-1">Clean Bowled</p>
-                    </div>
-
-                    <div className="flex flex-col items-center px-6 border-x border-red-500/30">
-                      <div className="text-red-300 text-[10px] uppercase font-bold">Final Score</div>
-                      <div className="text-4xl font-mono font-bold text-white">{stats.score}</div>
-                    </div>
-
-                    <div className="flex flex-col items-end gap-2">
-                      <button 
-                          onClick={startGame}
-                          className="px-6 py-2 bg-white text-red-900 font-bold rounded-xl text-lg hover:bg-red-50 transition-all transform hover:scale-105 shadow-lg"
-                      >
-                          Play Again
-                      </button>
-                      {autoRestartCountdown !== null && (
-                        <p className="text-[10px] text-red-200 font-medium">
-                          Restarting in {autoRestartCountdown}s
-                        </p>
-                      )}
-                    </div>
+          {/* Scripted delivery banner */}
+          {gameState === GameState.BATTING && (
+              <div className="pointer-events-none bg-black/70 backdrop-blur-md px-8 py-4 rounded-2xl border border-yellow-500/50 text-center shadow-[0_0_40px_rgba(234,179,8,0.2)] max-w-xl">
+                  <div className="text-[10px] uppercase tracking-[0.3em] text-yellow-500 font-bold">
+                    Delivery {deliveryIndex + 1} of {FAMOUS_DELIVERIES.length} · {currentDelivery.styleTag} · {currentDelivery.speedKmh} km/h
                   </div>
+                  <h2 className="text-3xl font-black italic text-white tracking-tight uppercase mt-1">
+                    {currentDelivery.name}
+                  </h2>
+                  <div className="text-sm text-yellow-200 font-bold mt-0.5">
+                    {currentDelivery.bowler}, {currentDelivery.year}
+                  </div>
+                  <p className="text-xs text-gray-400 mt-2 italic">{currentDelivery.description}</p>
               </div>
+          )}
+
+          {/* Innings result card */}
+          {gameState === GameState.FINISHED && (
+              <ResultCard history={history} onPlayAgain={startGame} />
           )}
         </div>
 
@@ -166,7 +182,8 @@ const App: React.FC = () => {
         <div className="pointer-events-auto flex flex-col items-center justify-center py-10">
             {gameState === GameState.MENU && (
                 <div className="bg-black/90 p-8 rounded-3xl border border-yellow-500/50 text-center max-w-lg shadow-2xl backdrop-blur-xl">
-                    <h2 className="text-4xl font-extrabold mb-4 text-yellow-500 italic tracking-tighter uppercase">Calibration</h2>
+                    <h2 className="text-4xl font-extrabold mb-2 text-yellow-500 italic tracking-tighter uppercase">Calibration</h2>
+                    <p className="text-xs text-gray-400 mb-6 uppercase tracking-widest">Then face 5 famous deliveries</p>
                     
                     {/* Calibration Section */}
                     <div className="mb-6 bg-white/5 p-4 rounded-xl border border-white/10 text-left">
