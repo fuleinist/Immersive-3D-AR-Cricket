@@ -23,6 +23,12 @@
  * --dpr emulates a retina-class display via CDP device-metrics override so
  * dpr-dependent renderer costs (Canvas dpr=[1,2]) are measurable headless.
  *
+ * --fake-pose standing|sitting replaces camera + MediaPipe with a synthetic
+ * ~30 Hz landmark stream (window.__AR_CRICKET_FAKE_POSE__ hook), so the
+ * full pose pipeline — smoothing, mode detection, seated adaptation,
+ * avatar/bat solve — is exercised headlessly and its allocation churn is
+ * measurable. Camera/WASM costs are NOT represented in this mode.
+ *
  * Chrome binary: $CHROME_PATH or the standard macOS install location.
  */
 import { spawn } from 'node:child_process';
@@ -39,6 +45,7 @@ const URL_TO_PROBE = opt('url', 'http://localhost:3100');
 const SECONDS = Number(opt('seconds', '10'));
 const SETTLE = Number(opt('settle', '6'));
 const DPR = Number(opt('dpr', '1'));
+const FAKE_POSE = opt('fake-pose', null); // 'standing' | 'sitting' — synthetic pose stream
 const SCREENSHOT = opt('screenshot', null);
 const JSON_OUT = opt('json', null);
 
@@ -128,6 +135,11 @@ await send('Runtime.enable', {}, sessionId);
 if (DPR !== 1) {
   await send('Emulation.setDeviceMetricsOverride', {
     width: 1440, height: 900, deviceScaleFactor: DPR, mobile: false,
+  }, sessionId);
+}
+if (FAKE_POSE) {
+  await send('Page.addScriptToEvaluateOnNewDocument', {
+    source: `window.__AR_CRICKET_FAKE_POSE__ = ${JSON.stringify(FAKE_POSE)};`,
   }, sessionId);
 }
 const navStart = Date.now();
@@ -249,8 +261,11 @@ if (!clicked) console.error('WARN: PLAY BALL button not found — batting phase 
 await sleep(2500); // menu exit + scripted run-up (ball bowls at ~1.2s)
 
 const batting = clicked ? await evaluate(`${SAMPLER}(${SECONDS})`, true) : null;
+if (batting) {
+  batting.trackingBadge = await evaluate(`(document.body?.innerText?.match(/sit mode|standing/i)?.[0]) ?? 'none'`);
+}
 
-const report = { url: URL_TO_PROBE, seconds: SECONDS, dpr: DPR, bootMs, menu, batting };
+const report = { url: URL_TO_PROBE, seconds: SECONDS, dpr: DPR, fakePose: FAKE_POSE, bootMs, menu, batting };
 console.log(JSON.stringify(report, (k, v) => (typeof v === 'number' ? Math.round(v * 100) / 100 : v), 2));
 if (JSON_OUT) writeFileSync(JSON_OUT, JSON.stringify(report, null, 2));
 

@@ -70,14 +70,31 @@ export const WebcamPose = React.memo(({ onPoseUpdate, showVideo = true }: Webcam
   useEffect(() => {
     let pose: any;
     let stream: any = null;
+    let stopFake: (() => void) | null = null;
     let isCancelled = false;
-    
+
     setIsInitializing(true);
     setError(null);
 
     const init = async () => {
       if (!videoRef.current) return;
-      
+
+      // Headless/dev harness hook (scripts/perf-probe.mjs): synthesize the
+      // pose stream and skip camera + MediaPipe entirely. Inert unless the
+      // flag is set on window before page load; the module is a lazy chunk.
+      const fakeMode = (window as any).__AR_CRICKET_FAKE_POSE__;
+      if (fakeMode) {
+        try {
+          const { startFakePoseLoop } = await import('../services/fakePose');
+          if (isCancelled) return;
+          stopFake = startFakePoseLoop(onPoseUpdate, fakeMode === 'sitting');
+          setIsInitializing(false);
+        } catch (e) {
+          console.error('Fake pose loop failed to start:', e);
+        }
+        return;
+      }
+
       if (!(window as any).Pose) {
         if (!isCancelled) setTimeout(init, 500);
         return;
@@ -165,6 +182,7 @@ export const WebcamPose = React.memo(({ onPoseUpdate, showVideo = true }: Webcam
 
     return () => {
       isCancelled = true;
+      if (stopFake) stopFake();
       if (requestRef.current !== null) cancelAnimationFrame(requestRef.current);
       if (pose) pose.close();
       if (stream) {
