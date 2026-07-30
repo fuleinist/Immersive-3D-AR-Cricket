@@ -3,7 +3,6 @@ import { useFrame } from '@react-three/fiber';
 import { useBox } from '@react-three/cannon';
 import * as THREE from 'three';
 import { Landmark, PoseLandmarkFrame, Stance, GameMode, TrackingMode, ResolvedTrackingMode } from '../types';
-import { BatTransformSmoother } from '../services/batSmoothing';
 import { BatTransformSolver, type BatJoints } from '../services/batTransform';
 
 interface AvatarProps {
@@ -108,19 +107,18 @@ export const Avatar: React.FC<AvatarProps> = ({
     batPos: new THREE.Vector3(),
     boneDir: new THREE.Vector3(),
     targetQuat: new THREE.Quaternion(),
-    dampedPos: new THREE.Vector3(), dampedQuat: new THREE.Quaternion(),
     worldPos: new THREE.Vector3(), worldQuat: new THREE.Quaternion(),
     euler: new THREE.Euler(),
     up: new THREE.Vector3(0, 1, 0),
   }), []);
 
-  // Grip-anchored bat solver + derived-level damper. The solver computes
-  // the bat transform from the scratch joints (aliases, zero churn); the
-  // smoother damps that transform itself, which landmark smoothing alone
-  // cannot steady because the perpendicular projection amplifies
-  // orientation noise.
+  // Grip-anchored bat solver. The bat is a rigid extension of the arm:
+  // its transform is solved fresh EVERY render frame from the same
+  // smoothed scratch joints that drive the bones below, with no
+  // bat-only filtering stage downstream — the only smoothing the bat
+  // experiences is the landmarks' own One Euro filter, so a steady arm
+  // means a pixel-steady bat by construction.
   const batSolver = useMemo(() => new BatTransformSolver(), []);
-  const batSmoother = useMemo(() => new BatTransformSmoother(), []);
   const batJoints = useMemo<BatJoints>(() => ({
     lShoulder: scratch.lShoulder, rShoulder: scratch.rShoulder,
     lElbow: scratch.lElbow, rElbow: scratch.rElbow,
@@ -128,10 +126,11 @@ export const Avatar: React.FC<AvatarProps> = ({
     lHip: scratch.lHip, rHip: scratch.rHip,
   }), [scratch]);
 
-  // Switching stance moves the grip to the other wrist — reset the damper
-  // so the bat snaps to the new side instead of sweeping across the body,
-  // and drop any swing phase built up on the old side.
-  useEffect(() => { batSmoother.reset(); batSolver.resetSwing(); }, [stance, batSmoother, batSolver]);
+  // Switching stance moves the grip to the other wrist — drop any swing
+  // phase built up on the old side. The transform itself needs no reset:
+  // the solver is a pure per-frame function of the joints, so the bat
+  // snaps to the new side on the very next render frame.
+  useEffect(() => { batSolver.resetSwing(); }, [stance, batSolver]);
 
   // Seated swings are arm-only and slower: scale the swing thresholds and
   // restart phase detection whenever the tracking mode changes.
@@ -167,7 +166,7 @@ export const Avatar: React.FC<AvatarProps> = ({
     mesh.quaternion.setFromUnitVectors(scratch.up, direction.divideScalar(length));
   };
 
-  useFrame((_, delta) => {
+  useFrame(() => {
     const frame = landmarks.current;
     const hasPose = !!frame && frame.landmarks.length >= 33;
     const l = hasPose ? frame.landmarks : defaultPose;
@@ -185,7 +184,7 @@ export const Avatar: React.FC<AvatarProps> = ({
     const {
       headPos, lShoulder, rShoulder, lElbow, rElbow, lWrist, rWrist,
       lHip, rHip, lKnee, rKnee, lAnkle, rAnkle, midShoulder, midHip,
-      batPos, targetQuat, dampedPos, dampedQuat, worldPos, worldQuat, euler,
+      batPos, targetQuat, worldPos, worldQuat, euler,
     } = scratch;
 
     const getPos = (idx: number, out: THREE.Vector3) => {
@@ -238,28 +237,27 @@ export const Avatar: React.FC<AvatarProps> = ({
     // Grip-anchored bat transform: hang the bat off the SELECTED wrist
     // (right/left per stance), blade exactly 90° against that forearm —
     // never the old two-wrist cross, which floated the grip between the
-    // arms and could mirror the blade toward the wrong side. Then damp the
-    // derived transform (adaptive 1€ position, slerp orientation). Shot
-    // detection reads this same damped transform via the kinematic body
-    // below, so swing physics inherits the corrected anchor and the
-    // damping. A degenerate frame keeps the last good transform.
+    // arms and could mirror the blade toward the wrong side. The bat is
+    // bound rigidly to the arm: solve() runs on the same smoothed joints
+    // the bones just consumed, in this same render frame, and its output
+    // is applied unfiltered — shot detection reads this exact transform
+    // via the kinematic body below. A degenerate frame keeps the last
+    // good transform (solve() leaves the scratch untouched).
     const hand = stance === Stance.RIGHT ? ('right' as const) : ('left' as const);
 
     // Swing phase detection runs on the POSE clock (frame.timeMs), not the
     // render clock: the landmarks only change per pose frame, so diffing
     // per render frame would alias a fast swing into alternating v/0
-    // readings and underestimate proportionally to the display rate. The
-    // bat damper's adaptive cutoff updates on the same boundary (it would
-    // sawtooth if re-derived per render frame from a stepped target) —
-    // poseAdvanced/poseDt carry the sample clock to both.
-    let poseAdvanced = false;
+    // readings and underestimate proportionally to the display rate. This
+    // is a slow state machine (attack/release time constants + hysteresis),
+    // not per-frame noise filtering — the bat transform itself is solved
+    // fresh every render frame regardless.
     let poseDt = 1 / 30;
     const poseTime = hasPose && typeof frame.timeMs === 'number' ? frame.timeMs : -1;
     if (poseTime >= 0) {
       const prevTime = lastPoseTimeRef.current;
       if (poseTime !== prevTime) {
         lastPoseTimeRef.current = poseTime;
-        poseAdvanced = true;
         if (prevTime < 0) {
           // First real pose frame after the menu default pose: prime the
           // velocity estimate — diffing against the default stance would
@@ -279,13 +277,15 @@ export const Avatar: React.FC<AvatarProps> = ({
       batSolver.resetSwing();
     }
 
-    if (batSolver.solve(batJoints, hand, batPos, targetQuat)) {
-      batSmoother.filter(batPos, targetQuat, delta, dampedPos, dampedQuat, poseAdvanced, poseDt);
-    }
+    // Rigid binding: the solved transform IS the bat's transform for this
+    // render frame — no downstream damper, so the bat's angular delta per
+    // frame equals the forearm's by construction (batX is the forearm
+    // axis; the anchor is the wrist, copied exactly).
+    batSolver.solve(batJoints, hand, batPos, targetQuat);
 
     if (visualBatRef.current) {
-      visualBatRef.current.position.copy(dampedPos);
-      visualBatRef.current.quaternion.copy(dampedQuat);
+      visualBatRef.current.position.copy(batPos);
+      visualBatRef.current.quaternion.copy(targetQuat);
 
       visualBatRef.current.getWorldPosition(worldPos);
       visualBatRef.current.getWorldQuaternion(worldQuat);

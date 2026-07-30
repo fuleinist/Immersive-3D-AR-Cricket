@@ -1,6 +1,7 @@
 /**
  * Headless sanity check for services/poseSmoothing.ts, the seated
- * adaptation in services/trackingMode.ts, and services/batSmoothing.ts.
+ * adaptation in services/trackingMode.ts, and the per-render-frame bat
+ * solve in services/batTransform.ts.
  *
  * Bundles the pure modules with esbuild (already a vite dependency — no new
  * packages) and exercises them with synthetic streams:
@@ -10,11 +11,14 @@
  *   3. smooth-then-adapt ordering      -> seated synthetic body de-jittered
  *   4. seated grounding invariant      -> hips at the root plane, feet at
  *      standing depth, root pinned under sway, bat directions preserved
- *   5. bat transform damping           -> angular variance reduction on a
- *      noisy orientation stream + step-swing settle time
- *   6. irregular timestamps            -> no NaN, sane recovery after gaps
- *   7. 10k-frame micro-benchmark       -> µs/frame (must be trivially
+ *   5. irregular timestamps            -> no NaN, sane recovery after gaps
+ *   6. 10k-frame micro-benchmark       -> µs/frame (must be trivially
  *      sub-millisecond) + zero per-frame array/object churn
+ *
+ * The bat transform's temporal guarantees live in verify-bat-jitter.mjs
+ * (rigid bat-arm binding); there is deliberately no bat-level filter to
+ * test here — the landmark One Euro filters below ARE the bat's only
+ * smoothing.
  *
  * Run: npm run verify:smoothing
  */
@@ -30,7 +34,7 @@ await build({
   entryPoints: {
     'pose-smoothing.bundle': path.join(root, 'services', 'poseSmoothing.ts'),
     'tracking-mode.bundle': path.join(root, 'services', 'trackingMode.ts'),
-    'bat-smoothing.bundle': path.join(root, 'services', 'batSmoothing.ts'),
+    'bat-transform.bundle': path.join(root, 'services', 'batTransform.ts'),
   },
   bundle: true,
   format: 'esm',
@@ -54,7 +58,7 @@ const {
   SEATED_METRIC_SHOULDER_WIDTH,
   SEATED_METRIC_ANKLE_DEPTH,
 } = await import(path.join(cacheDir, 'tracking-mode.bundle.mjs'));
-const { BatTransformSmoother } = await import(path.join(cacheDir, 'bat-smoothing.bundle.mjs'));
+const { BatTransformSolver } = await import(path.join(cacheDir, 'bat-transform.bundle.mjs'));
 const THREE = await import('three');
 
 // Mirror App.tsx: arm chain gets the stronger per-landmark profile.
@@ -316,139 +320,6 @@ console.log('\n--- seated grounding invariant (avatar not half-sunk) ---');
   });
 }
 
-console.log('\n--- bat transform damping (derived-level) ---');
-{
-  const DT = 1 / 60; // render clock
-  const smoother = new BatTransformSmoother();
-  const baseQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.3, 0.2, -0.1));
-  const baseP = new THREE.Vector3(0.35, -0.2, -0.35);
-  const outP = new THREE.Vector3(), outQ = new THREE.Quaternion();
-  const axis = new THREE.Vector3(), qNoise = new THREE.Quaternion(), qTarget = new THREE.Quaternion(), pTarget = new THREE.Vector3();
-
-  // Static target + angular gaussian noise (~2 deg) + 2mm position noise.
-  const rawAngles = [], outAngles = [], rawPosErr = [], outPosErr = [];
-  for (let f = 0; f < 600; f++) {
-    axis.set(gauss(), gauss(), gauss()).normalize();
-    qNoise.setFromAxisAngle(axis, gauss() * 2 * Math.PI / 180);
-    qTarget.copy(baseQ).multiply(qNoise);
-    pTarget.set(baseP.x + gauss() * 0.002, baseP.y + gauss() * 0.002, baseP.z + gauss() * 0.002);
-    smoother.filter(pTarget, qTarget, DT, outP, outQ);
-    rawAngles.push(qTarget.angleTo(baseQ));
-    outAngles.push(outQ.angleTo(baseQ));
-    rawPosErr.push(pTarget.distanceTo(baseP));
-    outPosErr.push(outP.distanceTo(baseP));
-  }
-  const warm = (a) => a.slice(30);
-  const angReduction = 1 - variance(warm(outAngles)) / variance(warm(rawAngles));
-  const posReduction = 1 - variance(warm(outPosErr)) / variance(warm(rawPosErr));
-  console.log(`        -> bat orientation angular variance -${(angReduction * 100).toFixed(1)}%, position variance -${(posReduction * 100).toFixed(1)}%`);
-  report('noisy orientation stream: angular variance reduced >= 70%', () =>
-    assert.ok(angReduction >= 0.7, `only ${(angReduction * 100).toFixed(1)}%`));
-  report('noisy position stream: position variance reduced >= 70%', () =>
-    assert.ok(posReduction >= 0.7, `only ${(posReduction * 100).toFixed(1)}%`));
-
-  // Step swing: target rotates 120 deg over 6 render frames (0.1s), holds.
-  const swing = new BatTransformSmoother();
-  const qStart = new THREE.Quaternion();
-  const qEnd = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), 2 * Math.PI / 3);
-  const rampFrames = 6, holdAfter = 30;
-  const total = rampFrames + holdAfter;
-  let settleFrames = -1;
-  for (let f = 0; f < total; f++) {
-    const t = Math.min(1, (f + 1) / rampFrames);
-    qTarget.copy(qStart).slerp(qEnd, t);
-    pTarget.set(0.3 * t, 0, 0); // hands travel with the swing
-    swing.filter(pTarget, qTarget, DT, outP, outQ);
-    if (f >= rampFrames && settleFrames < 0 && outQ.angleTo(qEnd) < 2 * Math.PI / 180) {
-      settleFrames = f - rampFrames + 1;
-    }
-  }
-  console.log(`        -> 120 deg swing over ${rampFrames} render frames: settled within ${settleFrames} frame(s) of ramp end`);
-  report('step swing settles within 3 render frames (~1.5 pose frames)', () =>
-    assert.ok(settleFrames >= 0 && settleFrames <= 3, `settle ${settleFrames}`));
-
-  report('non-finite target is skipped, last good transform kept', () => {
-    const s = new BatTransformSmoother();
-    const p0 = new THREE.Vector3(0.1, 0.2, 0.3), q0 = new THREE.Quaternion();
-    s.filter(p0, q0, DT, outP, outQ);
-    const beforeP = outP.clone(), beforeQ = outQ.clone();
-    pTarget.set(NaN, 0, 0);
-    s.filter(pTarget, q0, DT, outP, outQ);
-    assert.ok(outP.equals(beforeP) && outQ.equals(beforeQ), 'output moved on NaN input');
-    assert.ok(Number.isFinite(outP.x) && Number.isFinite(outQ.w), 'NaN leaked into output');
-  });
-}
-
-console.log('\n--- bat damper: render-cadence decoupling (30Hz target, 60Hz render) ---');
-{
-  // Mirror Avatar.tsx: the solved target only changes per POSE frame; the
-  // damper runs per RENDER frame and only adapts its cutoff when the
-  // caller marks a new sample. Assert (a) the 30 Hz target steps are
-  // damped well below the input, (b) convergence continues BETWEEN samples
-  // (no step-then-freeze stair-stepping), (c) a step target still settles
-  // inside a responsiveness bound.
-  const POSE_DT = 1 / 30, RENDER_DT = 1 / 60;
-  const smoother = new BatTransformSmoother();
-  const baseQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.3, 0.2, -0.1));
-  const baseP = new THREE.Vector3(0.35, -0.2, -0.35);
-  const outP = new THREE.Vector3(), outQ = new THREE.Quaternion();
-  const axis = new THREE.Vector3(), qNoise = new THREE.Quaternion();
-  const qTarget = new THREE.Quaternion(), pTarget = new THREE.Vector3();
-  const prevTargetQ = new THREE.Quaternion(), prevOutQ = new THREE.Quaternion();
-
-  const inSteps = [], outSteps = [], boundarySteps = [], offSteps = [];
-  let havePrev = false;
-  for (let pf = 0; pf < 300; pf++) {
-    axis.set(gauss(), gauss(), gauss()).normalize();
-    qNoise.setFromAxisAngle(axis, gauss() * 2 * Math.PI / 180);
-    qTarget.copy(baseQ).multiply(qNoise);
-    pTarget.set(baseP.x + gauss() * 0.002, baseP.y + gauss() * 0.002, baseP.z + gauss() * 0.002);
-    for (let r = 0; r < 2; r++) {
-      smoother.filter(pTarget, qTarget, RENDER_DT, outP, outQ, r === 0, POSE_DT);
-      if (pf > 30) {
-        if (r === 0) inSteps.push(qTarget.angleTo(prevTargetQ));
-        if (havePrev) {
-          const step = outQ.angleTo(prevOutQ);
-          outSteps.push(step);
-          (r === 0 ? boundarySteps : offSteps).push(step);
-        }
-        prevOutQ.copy(outQ);
-        havePrev = true;
-      }
-    }
-    prevTargetQ.copy(qTarget);
-  }
-  const rms = (a) => Math.sqrt(a.reduce((acc, x) => acc + x * x, 0) / a.length);
-  const mean = (a) => a.reduce((acc, x) => acc + x, 0) / a.length;
-  const inRms = rms(inSteps), outRms = rms(outSteps);
-  console.log(`        -> target step RMS ${(inRms * 180 / Math.PI).toFixed(3)} deg, output step RMS ${(outRms * 180 / Math.PI).toFixed(3)} deg`);
-  report('pose-cadence target steps damped >= 60% at render rate', () =>
-    assert.ok(outRms < inRms * 0.4, `ratio ${(outRms / inRms).toFixed(2)}`));
-  report('convergence continues between samples (no stair-step freeze)', () => {
-    const ratio = mean(offSteps) / Math.max(1e-12, mean(boundarySteps));
-    assert.ok(ratio > 0.2, `off-boundary mean step ratio ${ratio.toFixed(2)}`);
-  });
-
-  // Step response: one 30 deg target jump at the pose rate, then hold.
-  const stepper = new BatTransformSmoother();
-  const qStart = new THREE.Quaternion();
-  const qJump = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI / 6);
-  pTarget.copy(baseP);
-  stepper.filter(pTarget, qStart, RENDER_DT, outP, outQ, true, POSE_DT); // prime
-  let settleFrames = -1;
-  const window = 20; // render frames after the jump
-  for (let rf = 0; rf < window; rf++) {
-    // Target jumped once (pose frame 0); afterwards held constant while the
-    // damper keeps converging per render frame.
-    const isNew = rf % 2 === 0;
-    stepper.filter(pTarget, qJump, RENDER_DT, outP, outQ, isNew, POSE_DT);
-    if (settleFrames < 0 && outQ.angleTo(qJump) < 2 * Math.PI / 180) settleFrames = rf + 1;
-  }
-  console.log(`        -> 30 deg target jump: settled within ${settleFrames} render frame(s)`);
-  report('step response settles within 16 render frames (~0.27s)', () =>
-    assert.ok(settleFrames > 0 && settleFrames <= 16, `settle ${settleFrames}`));
-}
-
 console.log('\n--- irregular timestamps ---');
 {
   const smoother = makeImageSmoother();
@@ -478,7 +349,9 @@ console.log('\n--- hot path: allocation + throughput ---');
 {
   const img = makeImageSmoother();
   const world = makeWorldSmoother();
-  const bat = new BatTransformSmoother();
+  // The bat work that actually runs per render frame now: one solve()
+  // from the smoothed joints (plus notePoseFrame at the pose cadence).
+  const solver = new BatTransformSolver();
   const frames = 10_000;
   const imgFrames = Array.from({ length: 256 }, () => noisyCopy(basePose('image'), 0.004));
   const worldFrames = Array.from({ length: 256 }, () => noisyCopy(basePose('world'), 0.01));
@@ -492,19 +365,29 @@ console.log('\n--- hot path: allocation + throughput ---');
     assert.equal(refBefore[7], lmBefore);
   });
 
-  const batTargetP = new THREE.Vector3(0.3, -0.2, -0.3);
-  const batTargetQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.3, 0.2, -0.1));
+  // Preallocated solver I/O, mirroring Avatar.tsx scratch (zero-alloc
+  // hot path): joints filled once from the base world pose and held.
+  const SIZE = 0.85;
+  const mapW = (p) => new THREE.Vector3(p.x * SIZE, -p.y * SIZE, -p.z * SIZE);
+  const wl = basePose('world');
+  const batJoints = {
+    lShoulder: mapW(wl[11]), rShoulder: mapW(wl[12]),
+    lElbow: mapW(wl[13]), rElbow: mapW(wl[14]),
+    lWrist: mapW(wl[15]), rWrist: mapW(wl[16]),
+    lHip: mapW(wl[23]), rHip: mapW(wl[24]),
+  };
   const batOutP = new THREE.Vector3(), batOutQ = new THREE.Quaternion();
 
   const t0 = process.hrtime.bigint();
   for (let f = 0; f < frames; f++) {
     img.filter(imgFrames[f & 255], f * FRAME_MS);
     world.filter(worldFrames[f & 255], f * FRAME_MS);
-    bat.filter(batTargetP, batTargetQ, 1 / 60, batOutP, batOutQ);
+    if (f % 2 === 0) solver.notePoseFrame(batJoints, 'right', 1 / 30);
+    solver.solve(batJoints, 'right', batOutP, batOutQ);
   }
   const ns = Number(process.hrtime.bigint() - t0);
   const usPerFrame = ns / 1000 / frames; // both landmark streams + bat per pose frame
-  console.log(`        -> ${frames.toLocaleString()} frames x (33 landmarks x 3ch x 2 spaces + bat): ${(ns / 1e6).toFixed(1)}ms total, ${usPerFrame.toFixed(2)} µs/frame`);
+  console.log(`        -> ${frames.toLocaleString()} frames x (33 landmarks x 3ch x 2 spaces + bat solve): ${(ns / 1e6).toFixed(1)}ms total, ${usPerFrame.toFixed(2)} µs/frame`);
   report('throughput: < 250 µs/frame (budget is trivially sub-millisecond)', () =>
     assert.ok(usPerFrame < 250, `${usPerFrame.toFixed(2)} µs/frame`));
 }

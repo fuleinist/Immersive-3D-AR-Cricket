@@ -49,9 +49,12 @@ import { alpha } from './poseSmoothing';
  * fast-but-upward motion (backlift) is capped at half blend so the blade
  * only tilts; a downward downswing sweeps it all the way over. The phase
  * transitions are time-based (fast attack, gentle release) with a speed
- * floor for hysteresis, and BatTransformSmoother continues to damp the
- * result downstream. When swingBlend is exactly 0 (stance/idle, no pose
- * frames seen) the solve path is bit-identical to the pre-swing solver.
+ * floor for hysteresis — a slow state machine, not a per-frame filter, so
+ * it cannot inject chatter. The renderer applies the solved transform
+ * directly (the bat is a rigid extension of the arm: the ONLY smoothing
+ * it experiences is the landmarks' own One Euro filter). When swingBlend
+ * is exactly 0 (stance/idle, no pose frames seen) the solve path is
+ * bit-identical to the pre-swing solver.
  *
  * Degenerate frames (collapsed forearm/shoulders/torso, non-finite
  * inputs) return false and leave the outputs untouched, so callers keep
