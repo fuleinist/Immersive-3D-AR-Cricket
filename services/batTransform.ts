@@ -6,55 +6,91 @@ import { alpha } from './poseSmoothing';
  *
  * The bat hangs off the SELECTED hand only — right-handed stance grips at
  * the right wrist (landmark 16), left-handed at the left wrist (15) — and
- * the blade axis sits exactly perpendicular (90°) against that hand's
- * forearm (elbow -> wrist). This replaces the old two-wrist construction
- * (midWrist anchor + wristDiff x forearm cross), which floated the grip
- * between the arms and could mirror the blade toward the wrong side.
+ * the blade is framed by a TWO-SEGMENT arm hinge plus a phase-aware wrist
+ * cock, replacing the old rigid "blade exactly 90° to the forearm" lock.
+ * The 90° lock was biomechanically wrong: motion-capture studies of
+ * skilled cricket batters (McErlain-Naylor et al., J. Sports Sci. 2021,
+ * 39(16):1877-1888, doi:10.1080/02640414.2021.1934289; Peploe et al.,
+ * Sports Biomechanics 2019, 18(5):534-546) measure the wrist cocking
+ * angle — the angular offset between the lead forearm and the bat —
+ * at ~119° ± 12° at the commencement of the downswing, deepening to
+ * ~105° (minimum) early in the downswing (wrist lag), then uncocking to
+ * ~162–169° at bat-ball impact. At impact the bat is a near-straight
+ * extension of the forearm, NOT perpendicular to it. Wrist uncocking is
+ * one of the three dominant predictors of bat speed (with X-factor and
+ * lead elbow extension), and those studies model the hand->bat link as
+ * rigid with all rotation about the wrist — exactly this solver's
+ * grip-anchor + per-frame-rigid design.
  *
- * Orientation derives from the forearm axis plus the body frame:
+ * TWO-SEGMENT HINGE AXIS. The blade is framed against the "hinge axis"
  *
- *   side    = normalize(rShoulder - lShoulder)   (anatomical right)
- *   up      = normalize(midShoulder - midHip)    (torso up)
- *   forward = normalize(up x side)               (chest forward)
+ *   h = normalize(mix(forearm, upperArm, w))
+ *   forearm  = normalize(wrist - elbow)
+ *   upperArm = normalize(elbow - shoulder)          (grip side)
+ *   w = 0.5 * clamp01((120° - elbowFlex) / 60°)
  *
- * The blade is the forearm axis rotated exactly 90° within the
- * forearm/body-up plane toward body-up — equivalently the component of
- * body-up perpendicular to the forearm, normalized. Because the reference
- * is a fixed body axis (never a difference of two noisy wrist positions),
- * the blade can never flip to the wrong side: its up-component is
- * strictly positive while the up-reference is active. When the forearm is
- * near-parallel to body-up (arm hanging straight down), the reference
- * falls back to chest-forward, so the bat points horizontally forward
- * instead of degenerating. The construction is coordinate-free, so a
- * left-handed pose (the mirror of a right-handed one) mirrors the bat
- * deterministically — the only axis that picks up the reflection's
+ * where elbowFlex is the interior elbow angle (straight arm = 180°).
+ * With a straight-ish arm (flex >= 120°: stance, idle, hang, impact)
+ * w = 0 and h IS the forearm axis, bit-identically. As the elbow tucks
+ * (backlift: rear elbow measured at 56–65° at downswing commencement)
+ * the hinge borrows up to half of the upper arm, so the bat responds to
+ * BOTH arm segments — shoulder rotation visibly carries the blade even
+ * when the forearm itself barely moves, the way a real cocked-wrist grip
+ * redistributes the angle across the two segments. The hinge never makes
+ * the blade LESS stable: the shoulder is the least noisy arm landmark.
+ *
+ * PHASE-AWARE WRIST COCK. The blade sits in the plane spanned by h and
+ * the body reference (below), at the cock angle θ measured from h:
+ *
+ *   blade = sin(θ)·n + cos(θ)·h
+ *
+ *   n = component of the body reference perpendicular to h (normalized)
+ *
+ * θ is driven by the swing state machine's swingBlend:
+ *
+ *   blend 0      -> θ = 90°   stance/idle: blade exactly perpendicular —
+ *                             bit-identical to the pre-swing solver
+ *   blend 0..0.3 -> θ 90°->75° pickup/backlift: wrists cock deeper into
+ *                             lag (research: minimum cocking ≈ 105°
+ *                             interior = 75° here)
+ *   blend 0.3..1 -> θ 75°->15° downswing uncocking: the measured 60° of
+ *                             wrist uncocking (75° -> 15°) — matches the
+ *                             studies' 57.5–61.9°; at full blend the bat
+ *                             is the near-extension of the arm, the
+ *                             classic impact geometry (interior 162–169°)
+ *
+ * So the down-sweep of a real swing emerges from uncocking (the blade
+ * pitching down through the arm's plane as the arm itself rotates),
+ * instead of the old roll-about-the-forearm hack that kept the 90° lock
+ * and tipped the blade toward gravity.
+ *
+ * The body reference and basis completion are unchanged: reference is
+ * body-up (midShoulder - midHip) with the continuous chest-forward
+ * fallback band when the hinge is near-parallel to it (|dot| 0.88..0.95)
+ * so a hanging arm can't flap the blade; n always leans toward the
+ * reference (dot > 0), which pins the blade to the correct,
+ * deterministic side. The basis completes as a proper orthonormal
+ * rotation with local +Y landing exactly on the blade: at rest X is the
+ * hinge axis and Z = X x Y; once the cock leaves 90° the face becomes
+ * Z = normalize(hinge x blade) with X = blade x Z, which reduces to the
+ * rest basis exactly at 90°. The construction is coordinate-free,
+ * so a left-handed pose (the mirror of a right-handed one) mirrors the
+ * bat deterministically — the only axis that picks up the reflection's
  * determinant sign is the face normal, by algebraic necessity.
  *
- * The basis completes with batX = forearm axis (already exactly
- * perpendicular to the blade) and batZ = batX x batY, a proper
- * right-handed rotation for the bat mesh (local +Y = blade, +Z = face).
- *
- * SWING AWARENESS. The body-up reference is right for stance, but a real
- * cricket swing carries the forearm horizontal/forward while the blade
- * must sweep DOWN through the ball. notePoseFrame() (called once per new
- * pose frame, never per render frame) tracks the grip-chain velocity
- * RELATIVE to the torso — common-mode rejection, so locomotion never
- * reads as a swing — and raises `swingBlend` 0..1; solve() then rotates
- * the blade within the
- * plane perpendicular to the forearm, from the stance orientation toward
- * the world-down (gravity) component of that plane. Rotating about the
- * forearm axis keeps the 90° invariant exact at any blend, and blending
- * toward a plane-projected reference can never degenerate the way a raw
- * lerp toward (0,-1,0) could when the forearm itself points down. A pure
- * fast-but-upward motion (backlift) is capped at half blend so the blade
- * only tilts; a downward downswing sweeps it all the way over. The phase
- * transitions are time-based (fast attack, gentle release) with a speed
- * floor for hysteresis — a slow state machine, not a per-frame filter, so
- * it cannot inject chatter. The renderer applies the solved transform
- * directly (the bat is a rigid extension of the arm: the ONLY smoothing
- * it experiences is the landmarks' own One Euro filter). When swingBlend
- * is exactly 0 (stance/idle, no pose frames seen) the solve path is
- * bit-identical to the pre-swing solver.
+ * SWING DETECTION (unchanged). notePoseFrame() (called once per new pose
+ * frame, never per render frame) tracks the grip-chain velocity RELATIVE
+ * to the torso — common-mode rejection, so locomotion never reads as a
+ * swing — and raises `swingBlend` 0..1. A pure fast-but-upward motion
+ * (backlift) is capped at half blend; a downward downswing drives it to
+ * 1. The phase transitions are time-based (fast attack, gentle release)
+ * with a speed floor for hysteresis — a slow state machine, not a
+ * per-frame filter, so it cannot inject chatter. The renderer applies
+ * the solved transform directly (the bat is a rigid extension of the
+ * arm: the ONLY smoothing it experiences is the landmarks' own One Euro
+ * filter). When swingBlend is exactly 0 (stance/idle, no pose frames
+ * seen) and the elbow is straight enough that the hinge is disengaged,
+ * the solve path is bit-identical to the pre-swing solver.
  *
  * Degenerate frames (collapsed forearm/shoulders/torso, non-finite
  * inputs) return false and leave the outputs untouched, so callers keep
@@ -82,22 +118,52 @@ export interface BatJoints {
   rHip: THREE.Vector3;
 }
 
-/** A body reference whose |dot| with the forearm exceeds this is too
+/** A body reference whose |dot| with the hinge exceeds this is too
  *  parallel to project — the fallback fully owns the reference here
  *  (0.95 ~= within 18°). */
 const PARALLEL_LIMIT = 0.95;
-/** Below this |forearm·bodyUp| the blade reference is purely body-up.
+/** Below this |hinge·bodyUp| the blade reference is purely body-up.
  *  Between REF_BLEND_START and PARALLEL_LIMIT the reference blends
- *  continuously toward the fallback, so a forearm hovering near the band
+ *  continuously toward the fallback, so a hinge hovering near the band
  *  edge cannot flap the blade between two references ~90° apart on
  *  consecutive pose frames (the old hard switch showed up as the bat
  *  visibly shaking whenever the arm hung near-vertical). */
 const REF_BLEND_START = 0.88;
 const MIN_LEN_SQ = 1e-12;
 
-/** World gravity direction in solver space (the renderer maps both
- *  landmark conventions to y-up locally). Read-only. */
-const WORLD_DOWN = new THREE.Vector3(0, -1, 0);
+/**
+ * Phase-aware wrist-cock angles (degrees), measured FROM the hinge axis
+ * toward the body-up side — i.e. 180° minus the studies' interior wrist
+ * cocking angle. Research pins (McErlain-Naylor et al. 2021; Peploe et
+ * al. 2019, skilled batters, mean ± SD):
+ *  - downswing commencement: interior 119.3 ± 11.8° (M) / 118.7 ± 12.2°
+ *    (F) -> 61° here; the model passes this point mid-transition
+ *  - minimum during downswing (wrist lag): interior ~105° (implied by
+ *    the 57.5–61.9° of uncocking to impact) -> COCK_LAG_DEG = 75°
+ *  - impact: interior 162.1 ± 8.5° (M) / 168.9 ± 10.4° (F) ->
+ *    COCK_IMPACT_DEG = 15° (near-extension of the arm)
+ *  - stance/idle is unmeasured (address varies; the bat is mimed here),
+ *    so COCK_STANCE_DEG stays exactly 90° — the established, tested idle
+ *    look, bit-identical to the pre-swing solver.
+ */
+const COCK_STANCE_DEG = 90;
+const COCK_LAG_DEG = 75;
+const COCK_IMPACT_DEG = 15;
+/** Fraction of the blend where the downswing's wrist lag peaks before
+ *  uncocking whips the blade through (early downswing). */
+const LAG_BLEND_END = 0.3;
+
+/**
+ * Two-segment hinge: maximum ownership the upper arm takes of the hinge
+ * axis, and the interior elbow-angle band over which that ownership
+ * ramps in. Rear elbow at downswing commencement measures 56–65° (full
+ * tuck -> HINGE_MAX); at impact 113–126° (hinge ~disengaged); stance and
+ * idle arms run straighter than ELBOW_HINGE_START_DEG, so the hinge is
+ * exactly the forearm there.
+ */
+const HINGE_MAX = 0.5;
+const ELBOW_HINGE_START_DEG = 120;
+const ELBOW_HINGE_FULL_DEG = 60;
 
 /**
  * Swing detection thresholds, in solver-local units per second (the
@@ -113,18 +179,21 @@ const SWING_DOWN_ON = 0.6; // downward wrist speed where the downswing ramp star
 const SWING_DOWN_FULL = 2.0; // downward speed for a full blade-over blend
 const SWING_DOWN_OFF = 0.45; // downward floor for the hysteresis band
 /** Pure speed with no downward component (backlift, fast horizontal cut)
- *  can only tilt the blade this far — never below horizontal. */
+ *  can only drive the blend this far — the cock never passes its lag
+ *  peak toward impact angles without a real downswing. */
 const SPEED_ONLY_CAP = 0.5;
 /** Low-pass cutoff (Hz) for the finite-difference speed estimate. */
 const VELOCITY_DCUTOFF = 1.5;
-/** Blend time constants (s): the blade tips over fast once the downswing
- *  is on, and sweeps back to stance gently so it never snaps. */
+/** Blend time constants (s): the cock deepens fast once the downswing
+ *  is on, and returns to stance gently so it never snaps. */
 const BLEND_ATTACK_TAU = 0.07;
 const BLEND_RELEASE_TAU = 0.24;
 
 const MIN_DT = 1 / 240;
 const MAX_DT = 0.5;
 const DEFAULT_DT = 1 / 30;
+
+const DEG2RAD = Math.PI / 180;
 
 const clamp01 = (x: number): number => (x < 0 ? 0 : x > 1 ? 1 : x);
 /** Hermite smoothstep on [0,1]: C1-continuous at both ends. */
@@ -138,9 +207,12 @@ const isFiniteVec = (v: THREE.Vector3): boolean =>
 
 export class BatTransformSolver {
   private readonly forearm = new THREE.Vector3();
+  private readonly upperArm = new THREE.Vector3();
+  private readonly hinge = new THREE.Vector3();
   private readonly bodyUp = new THREE.Vector3();
   private readonly side = new THREE.Vector3();
   private readonly forward = new THREE.Vector3();
+  private readonly batX = new THREE.Vector3();
   private readonly batY = new THREE.Vector3();
   private readonly batZ = new THREE.Vector3();
   private readonly tmp = new THREE.Vector3();
@@ -156,15 +228,15 @@ export class BatTransformSolver {
   private readonly velE = new THREE.Vector3();
   private readonly velTorso = new THREE.Vector3();
   private readonly refBlend = new THREE.Vector3();
-  private readonly downPerp = new THREE.Vector3();
   private havePrev = false;
   private speedSmooth = 0;
   private downSmooth = 0;
 
   /**
-   * 0 = stance (blade toward body-up), 1 = full downswing (blade toward
-   * gravity). Advanced only by notePoseFrame(); read by solve(). Exposed
-   * for tuning inspection and the headless harness.
+   * 0 = stance (blade perpendicular to the arm), 1 = full downswing
+   * (blade uncocked to the arm's near-extension). Advanced only by
+   * notePoseFrame(); read by solve(). Exposed for tuning inspection and
+   * the headless harness.
    */
   public swingBlend = 0;
   /**
@@ -180,6 +252,26 @@ export class BatTransformSolver {
     this.speedSmooth = 0;
     this.downSmooth = 0;
     this.swingBlend = 0;
+  }
+
+  /**
+   * The phase-aware wrist-cock angle (radians from the hinge axis) for
+   * the current swingBlend: 90° at stance, deepening to the 75° lag
+   * peak, then the 60° uncocking whip to 15° at full downswing — the
+   * measured cricket-swing numbers (see file header). Piecewise
+   * smoothstep, C1-continuous at the lag peak.
+   */
+  private cockAngleRad(): number {
+    const b = this.swingBlend;
+    if (b <= 0) return Math.PI / 2;
+    const deg =
+      b <= LAG_BLEND_END
+        ? COCK_STANCE_DEG +
+          (COCK_LAG_DEG - COCK_STANCE_DEG) * smoothstep01(b / LAG_BLEND_END)
+        : COCK_LAG_DEG +
+          (COCK_IMPACT_DEG - COCK_LAG_DEG) *
+            smoothstep01((b - LAG_BLEND_END) / (1 - LAG_BLEND_END));
+    return deg * DEG2RAD;
   }
 
   /**
@@ -219,7 +311,7 @@ export class BatTransformSolver {
     // measured RELATIVE to the torso (mid-shoulder) frame. Common-mode
     // rejection: locomotion — shuffling, stepping, bouncing between
     // deliveries — carries the wrists with the shoulders and must not read
-    // as a swing, or the blade wobbles by blend*theta (~pi at stance)
+    // as a swing, or the blade's cock angle pumps at the shuffle rhythm
     // while the arm itself is steady. A real swing is exactly the motion
     // that survives: the grip chain moving fast relative to the torso.
     // The wrist is the primary signal; the elbow (x0.8) corroborates it so
@@ -241,7 +333,8 @@ export class BatTransformSolver {
     // Swing target with hysteresis: below the OFF floors the target snaps
     // to 0 (the release time-constant still smooths the actual blend);
     // above them the downward component dominates while raw speed alone
-    // is capped so a backlift can only tilt the blade, never drop it.
+    // is capped so a backlift can only cock the blade into lag, never
+    // uncock it toward impact angles.
     const s = this.thresholdScale;
     let target = 0;
     if (this.speedSmooth >= SWING_SPEED_OFF * s || this.downSmooth >= SWING_DOWN_OFF * s) {
@@ -266,18 +359,44 @@ export class BatTransformSolver {
     outQuat: THREE.Quaternion,
   ): boolean {
     const right = handedness === 'right';
+    const shoulder = right ? joints.rShoulder : joints.lShoulder;
     const elbow = right ? joints.rElbow : joints.lElbow;
     const wrist = right ? joints.rWrist : joints.lWrist;
     const { lShoulder, rShoulder, lHip, rHip } = joints;
 
-    if (![elbow, wrist, lShoulder, rShoulder, lHip, rHip].every(isFiniteVec)) {
+    if (![shoulder, elbow, wrist, lShoulder, rShoulder, lHip, rHip].every(isFiniteVec)) {
       return false;
     }
 
-    // Forearm axis (elbow -> wrist) — the blade must sit 90° against it.
+    // Forearm axis (elbow -> wrist) — the distal segment of the hinge.
     const forearm = this.forearm.subVectors(wrist, elbow);
     if (forearm.lengthSq() < MIN_LEN_SQ) return false;
     forearm.normalize();
+
+    // Two-segment hinge axis: borrow up to HINGE_MAX of the upper arm as
+    // the elbow tucks. Interior elbow angle (straight = 180°) sets the
+    // weight; measured cricket rear elbows run 56–65° at the top of the
+    // backlift (hinge fully engaged) and 113–126° at impact (disengaged).
+    // At weight 0 the hinge IS the forearm, bit-identically.
+    const hinge = this.hinge.copy(forearm);
+    const upperArm = this.upperArm.subVectors(elbow, shoulder);
+    if (upperArm.lengthSq() >= MIN_LEN_SQ) {
+      upperArm.normalize();
+      const cosFlex = THREE.MathUtils.clamp(-upperArm.dot(forearm), -1, 1);
+      const flexDeg = Math.acos(cosFlex) / DEG2RAD;
+      const w =
+        HINGE_MAX *
+        clamp01(
+          (ELBOW_HINGE_START_DEG - flexDeg) / (ELBOW_HINGE_START_DEG - ELBOW_HINGE_FULL_DEG),
+        );
+      if (w > 0) {
+        hinge.lerp(upperArm, w);
+        // Unreachable by construction (weight < 1 and the segments are
+        // < 120° apart inside the engagement band), but never trust it.
+        if (hinge.lengthSq() < MIN_LEN_SQ) return false;
+        hinge.normalize();
+      }
+    }
 
     // Body frame: anatomical right along the shoulder line, torso up
     // (sum form — the 1/2 midpoint factor cancels under normalization).
@@ -302,18 +421,18 @@ export class BatTransformSolver {
     }
     forward.normalize();
 
-    // Blade axis: forearm rotated exactly 90° toward the most usable body
-    // reference. Prefer body-up (plumb bat in stance); as the forearm
+    // Blade plane: spanned by the hinge and the most usable body
+    // reference. Prefer body-up (plumb bat in stance); as the hinge
     // approaches parallel with it (arm hanging near-straight down), blend
     // continuously toward the chest-forward fallback instead of switching
     // — a hard switch flaps the blade ~90° whenever wrist noise straddles
     // the threshold, which reads as the bat shaking in a relaxed hold.
     // Guaranteed to terminate: forward is perpendicular to up by
-    // construction, so both can never be near-parallel to the forearm.
+    // construction, so both can never be near-parallel to the hinge.
     let ref = bodyUp;
-    const upness = Math.abs(forearm.dot(bodyUp));
+    const upness = Math.abs(hinge.dot(bodyUp));
     if (upness > REF_BLEND_START) {
-      const fallback = Math.abs(forearm.dot(forward)) <= PARALLEL_LIMIT ? forward : side;
+      const fallback = Math.abs(hinge.dot(forward)) <= PARALLEL_LIMIT ? forward : side;
       if (upness >= PARALLEL_LIMIT) {
         ref = fallback;
       } else {
@@ -324,42 +443,44 @@ export class BatTransformSolver {
       }
     }
 
-    // Gram-Schmidt: the component of `ref` perpendicular to the forearm.
-    // The result always leans toward `ref` (dot > 0), which is what pins
-    // the blade to the correct, deterministic side.
-    const batY = this.batY.copy(ref).addScaledVector(forearm, -ref.dot(forearm));
+    // Gram-Schmidt: the component of `ref` perpendicular to the hinge —
+    // the 90° cock direction. The result always leans toward `ref`
+    // (dot > 0), which is what pins the blade to the correct,
+    // deterministic side.
+    const batY = this.batY.copy(ref).addScaledVector(hinge, -ref.dot(hinge));
     if (batY.lengthSq() < MIN_LEN_SQ) return false; // unreachable — never NaN
     batY.normalize();
 
-    // Right-handed basis: X = forearm (exactly perpendicular to the blade),
-    // Z = X x Y. The mesh's local +Y (blade) / +Z (face) land on batY/batZ.
-    const batZ = this.batZ.crossVectors(forearm, batY);
-
-    // Swing-aware: rotate the blade within the plane perpendicular to the
-    // forearm, from the stance orientation toward the world-down component
-    // of that plane, by swingBlend * the signed angle between them.
-    // Rotation about the forearm axis preserves the exact 90° invariant
-    // and the unit norm at any blend — including the antiparallel case
-    // (blade straight up -> straight down sweeps through batZ) that a
-    // naive lerp would collapse. Skipped entirely at blend 0, so
+    // Phase-aware wrist cock: rotate the blade within the hinge/reference
+    // plane, from perpendicular (stance) through the lag peak to the
+    // near-extension of the arm (full downswing). n ⊥ h and both are
+    // unit, so the combination stays unit. At any cock angle the blade
+    // leaves the perpendicular to the hinge, so the basis can no longer
+    // be (hinge, blade, hinge x blade) — that is not a rotation and
+    // setFromRotationMatrix would mangle it. The orthonormal completion
+    // below keeps local +Y landing EXACTLY on the computed blade:
+    //   Z (face) = normalize(hinge x blade)   — perpendicular to both
+    //   X        = blade x Z                  — in-plane, unit by construction
+    // At the 90° stance this reduces to the old (hinge, blade, hinge x
+    // blade) basis exactly (X = hinge), and blend 0 skips the combine so
     // stance/idle output stays bit-identical to the pre-swing solver.
     if (this.swingBlend > 0) {
-      // Component of gravity perpendicular to the forearm: down + f.y*f.
-      const downPerp = this.downPerp.copy(WORLD_DOWN).addScaledVector(forearm, forearm.y);
-      if (downPerp.lengthSq() >= MIN_LEN_SQ) {
-        downPerp.normalize();
-        const theta = Math.atan2(downPerp.dot(batZ), downPerp.dot(batY));
-        const phi = this.swingBlend * theta;
-        const c = Math.cos(phi);
-        const sn = Math.sin(phi);
-        batY.multiplyScalar(c).addScaledVector(batZ, sn);
-        batZ.crossVectors(forearm, batY);
-      }
-      // forearm ~parallel to gravity (arm hanging straight down): no
-      // meaningful down direction in the blade plane — keep the stance blade.
-    }
+      const theta = this.cockAngleRad();
+      const c = Math.cos(theta);
+      const sn = Math.sin(theta);
+      batY.multiplyScalar(sn).addScaledVector(hinge, c);
 
-    this.basis.makeBasis(forearm, batY, batZ);
+      const batZ = this.batZ.crossVectors(hinge, batY);
+      if (batZ.lengthSq() < MIN_LEN_SQ) return false; // unreachable: cock >= 15°
+      batZ.normalize();
+      const batX = this.batX.crossVectors(batY, batZ);
+      this.basis.makeBasis(batX, batY, batZ);
+    } else {
+      // Right-handed basis: X = hinge axis, Z = X x Y. The mesh's local
+      // +Y (blade) / +Z (face) land on batY/batZ.
+      const batZ = this.batZ.crossVectors(hinge, batY);
+      this.basis.makeBasis(hinge, batY, batZ);
+    }
     outQuat.setFromRotationMatrix(this.basis);
     outPos.copy(wrist);
     return true;

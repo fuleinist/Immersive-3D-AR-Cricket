@@ -12,28 +12,31 @@
  * bounds (which verified the removed BatTransformSmoother damper) with
  * "bat tracks the arm exactly" bounds:
  *
- *   1. exact binding    -> per render frame, the bat's grip-axis (batX)
- *      angular delta EQUALS the forearm's angular delta within float
- *      tolerance (batX is the forearm axis by construction), and the
- *      anchor equals the smoothed wrist exactly. Any independent damping
- *      stage would show up here as the bat lagging (smaller steps).
+ *   1. exact binding    -> per render frame, the bat's rest grip-axis
+ *      (batX) angular delta EQUALS the hinge axis' angular delta within
+ *      float tolerance (at rest the basis X IS the hinge — the forearm
+ *      whenever the elbow is straight, the forearm/upper-arm mix when
+ *      tucked), and the anchor equals the smoothed wrist exactly. Any
+ *      independent damping stage would show up here as the bat lagging
+ *      (smaller steps).
  *   2. coherence ~1.0   -> a noisy-landmark stream produces ZERO
  *      additional bat-only jitter: mean blade step / mean forearm step
  *      stays in a tight band around 1.0 (the blade can only pick up the
  *      roll driven by the body reference — shoulders/hips, the least
  *      noisy joints — never filter dynamics of its own).
  *   3. blade decomp     -> per frame the blade step decomposes into
- *      "follow the forearm" (shortest-arc transport) + "roll about the
- *      forearm"; the follow part equals the forearm step and the roll
- *      part is bounded by the body frame's own motion plus the
- *      swingBlend state machine's deliberate (slow) rotation.
+ *      "follow the hinge" (shortest-arc transport) + "residual motion in
+ *      the hinge plane / about it"; the follow part equals the hinge step
+ *      and the residual is bounded by the body frame's own motion plus
+ *      the swingBlend state machine's deliberate (slow) cock rotation.
  *   4. determinism      -> a twin solver fed the same joint stream
  *      produces bitwise-identical transforms: no hidden filtering state
  *      beyond the declared swingBlend state machine.
  *   5. regimes          -> static stance / reference-band hang /
- *      locomotion / fidget: locomotion still never raises swingBlend
- *      (torso-relative rejection), no idle swing phase, and no
- *      single-frame blade flap in the near-parallel band.
+ *      locomotion / fidget / tucked-elbow hinge: locomotion still never
+ *      raises swingBlend (torso-relative rejection), no idle swing phase,
+ *      no single-frame blade flap in the near-parallel band, and the
+ *      hinge binding holds with the elbow bent.
  *
  * All streams use a seeded RNG: metrics are deterministic run to run.
  *
@@ -108,6 +111,11 @@ const SIGMA = 0.01; // 1cm base world noise, as in verify-pose-smoothing
  *  deg). 1e-5 deg is an order above that and still ~5 orders below real
  *  per-frame jitter — any damping lag (>= ~1% of a step) fails this. */
 const BIND_EPS_DEG = 1e-5;
+/** Blend-active delta allowance: absorbs body-reference drift reaching the
+ *  grip axis through cos(cock) (~0 near stance) plus float noise. Two
+ *  orders below real per-frame jitter; an independent damper's lag (>= ~1%
+ *  of a step) still fails this. */
+const BIND_SLACK_DEG = 0.15;
 /** Anchor tolerance: solve() copies the wrist vector verbatim. */
 const ANCHOR_EPS = 1e-12;
 
@@ -148,8 +156,45 @@ function hangWorld() {
   return l;
 }
 
+/** Backlift-style tuck: right elbow flexed ~66 deg, hinge engaged. */
+function tuckedWorld() {
+  const l = stanceWorld();
+  l[14] = { x: -0.30, y: 0.38, z: 0.02, visibility: 0.95 }; // R elbow
+  // e = elbow - shoulder ~ (-0.09, -0.17, 0.02); f = wrist - elbow ~
+  // (0.14, 0.08, 0.22): interior flex ~66 deg -> hinge weight ~0.45.
+  // Landmark noise wiggles the flex a couple of degrees, exercising the
+  // two-segment hinge under jitter (the exact-binding checks absorb it).
+  l[16] = { x: -0.16, y: 0.46, z: 0.24, visibility: 0.95 };
+  return l;
+}
+
 const mapW = (p) => new THREE.Vector3(p.x * SIZE, -p.y * SIZE, -p.z * SIZE);
 const deg = (rad) => (rad * 180) / Math.PI;
+
+// Mirror of the solver's two-segment hinge — keep in lockstep with
+// services/batTransform.ts. The rest basis X IS this axis.
+const HINGE_MAX = 0.5, ELBOW_HINGE_START = 120, ELBOW_HINGE_FULL = 60;
+const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
+const hingeDirOf = (shoulder, elbow, wrist, out) => {
+  const f = out.subVectors(wrist, elbow).normalize();
+  const e = new THREE.Vector3().subVectors(elbow, shoulder);
+  if (e.lengthSq() < 1e-12) return f;
+  e.normalize();
+  const cosFlex = Math.max(-1, Math.min(1, -e.dot(f)));
+  const flexDeg = (Math.acos(cosFlex) * 180) / Math.PI;
+  const w = HINGE_MAX * clamp01((ELBOW_HINGE_START - flexDeg) / (ELBOW_HINGE_START - ELBOW_HINGE_FULL));
+  if (w <= 0) return f;
+  return f.lerp(e, w).normalize();
+};
+
+// Mirror of the solver's phase-aware wrist cock — keep in lockstep.
+const COCK_STANCE = 90, COCK_LAG = 75, COCK_IMPACT = 15, LAG_BLEND_END = 0.3;
+const smooth01 = (x) => { const t = clamp01(x); return t * t * (3 - 2 * t); };
+const cockDegOf = (blend) =>
+  blend <= 0 ? COCK_STANCE
+    : blend <= LAG_BLEND_END
+      ? COCK_STANCE + (COCK_LAG - COCK_STANCE) * smooth01(blend / LAG_BLEND_END)
+      : COCK_LAG + (COCK_IMPACT - COCK_LAG) * smooth01((blend - LAG_BLEND_END) / (1 - LAG_BLEND_END));
 
 /**
  * Run one scenario end-to-end. `mutate(lms, t)` applies deterministic
@@ -177,17 +222,17 @@ function runScenario(makePose, mutate, seconds = 12) {
   };
   const batPos = new THREE.Vector3(), batQuat = new THREE.Quaternion();
   const twinPos = new THREE.Vector3(), twinQuat = new THREE.Quaternion();
-  const forearmDir = new THREE.Vector3(), batX = new THREE.Vector3(), batY = new THREE.Vector3();
-  const prevForearm = new THREE.Vector3(), prevBatX = new THREE.Vector3(), prevBatY = new THREE.Vector3();
+  const forearmDir = new THREE.Vector3(), hingeDir = new THREE.Vector3(), batX = new THREE.Vector3(), batY = new THREE.Vector3();
+  const prevForearm = new THREE.Vector3(), prevHinge = new THREE.Vector3(), prevBatX = new THREE.Vector3(), prevBatY = new THREE.Vector3();
   const alignQ = new THREE.Quaternion(), transported = new THREE.Vector3();
   const tip = new THREE.Vector3(), prevTip = new THREE.Vector3();
 
   const warm = Math.floor(2 * POSE_HZ);
   let forearmSteps = 0, batSteps = 0, tipSteps = 0, rollSteps = 0, n = 0;
-  let maxBatStep = 0, maxBindErr = 0, maxAxisErr = 0, maxAnchorDrift = 0, maxTwinDrift = 0;
+  let maxBatStep = 0, maxBindErr = 0, maxBindSlack = 0, maxAxisErr = 0, maxCockErr = 0, maxAnchorDrift = 0, maxTwinDrift = 0;
   let blendMax = 0, blendActive = 0;
   let solveFails = 0;
-  let havePrev = false;
+  let havePrev = false, prevTheta = COCK_STANCE, prevBlend = 0;
   let renderIdx = 0;
 
   for (let pf = 0; pf < Math.floor(seconds * POSE_HZ); pf++) {
@@ -232,25 +277,42 @@ function runScenario(makePose, mutate, seconds = 12) {
         Math.abs(batQuat.z - twinQuat.z), Math.abs(batQuat.w - twinQuat.w));
 
       forearmDir.subVectors(joints.rWrist, joints.rElbow).normalize();
+      hingeDirOf(joints.rShoulder, joints.rElbow, joints.rWrist, hingeDir);
       batX.set(1, 0, 0).applyQuaternion(batQuat);
       batY.set(0, 1, 0).applyQuaternion(batQuat);
       tip.copy(batPos).addScaledVector(batY, 0.9 * SIZE);
 
-      // Same-frame axis equality: batX IS the forearm axis, every frame.
-      maxAxisErr = Math.max(maxAxisErr, deg(batX.angleTo(forearmDir)));
+      // Same-frame phase-aware identities, exact by construction of the
+      // basis: angle(blade, hinge) == cock(blend), and the grip axis
+      // sits |90 - cock| off the hinge in the hinge/blade plane (== the
+      // hinge itself at rest, where blend == 0).
+      const theta = cockDegOf(solver.swingBlend);
+      maxAxisErr = Math.max(maxAxisErr,
+        Math.abs(deg(batX.angleTo(hingeDir)) - Math.abs(COCK_STANCE - theta)));
+      maxCockErr = Math.max(maxCockErr, Math.abs(deg(batY.angleTo(hingeDir)) - theta));
 
       if (havePrev) {
         const forearmStep = deg(forearmDir.angleTo(prevForearm));
-        // Exact binding: the grip axis' per-frame angular delta must
-        // equal the forearm's. (Holds during swings too — the swing
-        // blend rotates the blade ABOUT the forearm axis, never batX.)
-        maxBindErr = Math.max(maxBindErr, Math.abs(deg(batX.angleTo(prevBatX)) - forearmStep));
+        const hingeStep = deg(hingeDir.angleTo(prevHinge));
+        // Exact binding: batX = sin(cock)*hinge - cos(cock)*perp, so per
+        // frame the grip axis can only move by the hinge's rotation plus
+        // the deliberate state-machine cock change (plus a sliver of
+        // body-reference drift scaled by cos(cock) — ~0 near stance,
+        // bounded by BIND_SLACK_DEG when the blend is active). No
+        // independent dynamics. At rest both sides are float-exact.
+        const dTheta = Math.abs(theta - prevTheta);
+        const excess = deg(batX.angleTo(prevBatX)) - hingeStep - dTheta;
+        if (solver.swingBlend === 0 && prevBlend === 0) {
+          maxBindErr = Math.max(maxBindErr, excess);
+        } else {
+          maxBindSlack = Math.max(maxBindSlack, excess);
+        }
 
         const batStep = deg(batY.angleTo(prevBatY));
         // Decompose the blade step: transport the previous blade by the
-        // shortest arc taking prevForearm -> forearmDir; what remains is
-        // roll about the forearm (body-reference + swingBlend driven).
-        alignQ.setFromUnitVectors(prevForearm, forearmDir);
+        // shortest arc taking prevHinge -> hingeDir; what remains is the
+        // in-plane/roll residual (body-reference + swingBlend driven).
+        alignQ.setFromUnitVectors(prevHinge, hingeDir);
         transported.copy(prevBatY).applyQuaternion(alignQ);
         const roll = deg(transported.angleTo(batY));
 
@@ -267,9 +329,12 @@ function runScenario(makePose, mutate, seconds = 12) {
         n++;
       }
       prevForearm.copy(forearmDir);
+      prevHinge.copy(hingeDir);
       prevBatX.copy(batX);
       prevBatY.copy(batY);
       prevTip.copy(tip);
+      prevTheta = theta;
+      prevBlend = solver.swingBlend;
       havePrev = true;
       blendMax = Math.max(blendMax, solver.swingBlend);
       if (solver.swingBlend > 0.02) blendActive++;
@@ -283,7 +348,9 @@ function runScenario(makePose, mutate, seconds = 12) {
     coherence: batSteps / forearmSteps,
     maxBatStep,
     maxBindErr,
+    maxBindSlack,
     maxAxisErr,
+    maxCockErr,
     maxAnchorDrift,
     maxTwinDrift,
     tipJitter: tipSteps / n,
@@ -300,16 +367,20 @@ const fmt = (m) =>
 const reportBinding = (label, m) => {
   report(`${label}: solve never failed on a noisy stream`, () =>
     assert.equal(m.solveFails, 0, `${m.solveFails} degenerate solves`));
-  report(`${label}: grip axis IS the forearm axis, same frame (float tol)`, () =>
+  report(`${label}: blade angle to hinge == cock(blend), same frame (float tol)`, () =>
+    assert.ok(m.maxCockErr < BIND_EPS_DEG, `max cock error ${m.maxCockErr} deg`));
+  report(`${label}: grip axis angle to hinge == 90 - cock(blend), same frame (float tol)`, () =>
     assert.ok(m.maxAxisErr < BIND_EPS_DEG, `max axis error ${m.maxAxisErr} deg`));
-  report(`${label}: grip-axis angular delta == forearm angular delta (float tol)`, () =>
+  report(`${label}: grip-axis angular delta == hinge angular delta at rest (float tol)`, () =>
     assert.ok(m.maxBindErr < BIND_EPS_DEG, `max binding error ${m.maxBindErr} deg`));
+  report(`${label}: grip-axis delta <= hinge delta + cock change during blend (slack tol)`, () =>
+    assert.ok(m.maxBindSlack < BIND_SLACK_DEG, `max binding slack excess ${m.maxBindSlack} deg`));
   report(`${label}: anchor is exactly the smoothed wrist`, () =>
     assert.ok(m.maxAnchorDrift < ANCHOR_EPS, `anchor drift ${m.maxAnchorDrift}`));
   report(`${label}: zero hidden bat-only state (twin solver bitwise match)`, () =>
     assert.ok(m.maxTwinDrift === 0, `twin drift ${m.maxTwinDrift}`));
   report(`${label}: bat-arm coherence ~1.0 (no additional bat-only jitter)`, () =>
-    // The blade re-derives per frame from the forearm + body reference:
+    // The blade re-derives per frame from the hinge axis + body reference:
     // forearm twist about the blade axis is absorbed by the projection
     // (coherence < 1) and reference roll adds a little back (> 1) — both
     // are geometry, not filtering. Measured range across regimes:
@@ -371,6 +442,14 @@ console.log('\n--- bat-arm binding: the bat tracks the arm exactly ---');
   });
   console.log(`        -> hand fidget: ${fmt(m)}`);
   reportBinding('fidget', m);
+}
+
+{
+  const m = runScenario(tuckedWorld, null);
+  console.log(`        -> tucked elbow (hinge engaged): ${fmt(m)}`);
+  reportBinding('tucked elbow', m);
+  report('tucked elbow: no swing phase at idle', () =>
+    assert.ok(m.blendMax < 0.02, `blendMax ${m.blendMax}`));
 }
 
 console.log(failures === 0 ? '\nAll bat-arm binding checks passed.\n' : `\n${failures} check(s) FAILED.\n`);

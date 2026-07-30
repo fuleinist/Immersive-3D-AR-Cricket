@@ -1,14 +1,18 @@
 /**
- * Headless sanity check for services/batTransform.ts — the grip-anchored,
- * forearm-perpendicular bat that replaced the old midWrist + two-wrist
- * cross construction.
+ * Headless sanity check for services/batTransform.ts — the grip-anchored
+ * bat whose blade is framed by a two-segment arm hinge (forearm + upper
+ * arm) and a phase-aware, research-pinned wrist cock (90° stance ->
+ * 75° lag -> 15° impact; McErlain-Naylor et al. 2021, Peploe et al.
+ * 2019). Replaced the old midWrist + two-wrist cross construction, then
+ * the rigid 90°-to-forearm lock.
  *
  * Bundles the pure module with esbuild (already a vite dependency — no new
  * packages) and exercises the solver with synthetic joint sets:
  *
  *   1. grip anchor   -> bat position == selected wrist, exactly (both hands)
- *   2. 90 degrees    -> blade axis perpendicular to the grip forearm in a
- *      stance, arms-at-sides (forward fallback) and a raised-bat drive
+ *   2. 90 degrees    -> AT REST (swingBlend 0, straight arm) the blade is
+ *      exactly perpendicular to the grip forearm — bit-identical idle —
+ *      in a stance, arms-at-sides (forward fallback) and a raised drive
  *   3. correct side  -> grip on the stance side of the body midline;
  *      blade never below horizontal (up-reference side is deterministic)
  *   4. mirror        -> left-handed result == mirror of right-handed on a
@@ -18,10 +22,15 @@
  *      joints -> solve() false, outputs untouched
  *   6. pipeline      -> standing world landmarks and seated-adapted
  *      landmarks keep anchor + 90° through the renderer's coordinate map
- *   7. swing         -> synthetic fast-downward wrist motion blends the
- *      blade below horizontal (90° + anchor invariants intact); slow
- *      motion keeps the stance blade; backlift only tilts; seated
- *      threshold scaling; reset and stall release
+ *   7. swing         -> synthetic fast-downward wrist motion uncocks the
+ *      blade below horizontal (angle == cock(blend) against the hinge,
+ *      anchor intact); slow motion keeps the stance blade; backlift only
+ *      cocks into lag; seated threshold scaling; reset and stall release
+ *   8. hinge         -> tucked elbow: grip axis IS the forearm/upper-arm
+ *      hinge (not the bare forearm), blade perpendicular to the hinge at
+ *      rest, straight arm -> hinge bit-equals the forearm
+ *   9. research pins -> full downswing ends at the measured impact cock
+ *      (15° ± 2) via the measured lag zone (75° ± 2)
  *
  * Run: npm run verify:bat
  */
@@ -83,6 +92,33 @@ const forearmOf = (joints, hand) =>
 const bodyUpOf = (j) =>
   new THREE.Vector3().addVectors(j.lShoulder, j.rShoulder)
     .sub(new THREE.Vector3().addVectors(j.lHip, j.rHip)).normalize();
+
+// Mirrors of the solver's two-segment hinge and phase-aware cock — keep
+// the formulas in lockstep with services/batTransform.ts.
+const HINGE_MAX = 0.5, ELBOW_HINGE_START = 120, ELBOW_HINGE_FULL = 60;
+const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
+const hingeOf = (joints, hand) => {
+  const S = hand === 'right' ? joints.rShoulder : joints.lShoulder;
+  const E = hand === 'right' ? joints.rElbow : joints.lElbow;
+  const W = hand === 'right' ? joints.rWrist : joints.lWrist;
+  const f = new THREE.Vector3().subVectors(W, E).normalize();
+  const e = new THREE.Vector3().subVectors(E, S);
+  if (e.lengthSq() < 1e-12) return f;
+  e.normalize();
+  const cosFlex = Math.max(-1, Math.min(1, -e.dot(f)));
+  const flexDeg = (Math.acos(cosFlex) * 180) / Math.PI;
+  const w = HINGE_MAX * clamp01((ELBOW_HINGE_START - flexDeg) / (ELBOW_HINGE_START - ELBOW_HINGE_FULL));
+  if (w <= 0) return f;
+  return f.lerp(e, w).normalize();
+};
+const COCK_STANCE = 90, COCK_LAG = 75, COCK_IMPACT = 15, LAG_BLEND_END = 0.3;
+const smooth01 = (x) => { const t = clamp01(x); return t * t * (3 - 2 * t); };
+const cockDegOf = (blend) =>
+  blend <= 0 ? COCK_STANCE
+    : blend <= LAG_BLEND_END
+      ? COCK_STANCE + (COCK_LAG - COCK_STANCE) * smooth01(blend / LAG_BLEND_END)
+      : COCK_LAG + (COCK_IMPACT - COCK_LAG) * smooth01((blend - LAG_BLEND_END) / (1 - LAG_BLEND_END));
+const degOf = (a, b) => (a.angleTo(b) * 180) / Math.PI;
 const closeTo = (a, b, tol = CLOSE_TOL) =>
   Math.abs(a.x - b.x) < tol && Math.abs(a.y - b.y) < tol && Math.abs(a.z - b.z) < tol;
 
@@ -136,9 +172,12 @@ report('bat position is exactly the selected wrist (both hands, all poses)', () 
   }
 });
 
-console.log('\n--- 90 degrees against the forearm ---');
+console.log('\n--- 90 degrees against the forearm (at rest: blend 0, straight arm) ---');
 for (const [name, make] of POSES) {
   report(`${name}: blade axis exactly perpendicular to the grip forearm`, () => {
+    // All three poses keep the elbow straighter than the hinge band and
+    // run at swingBlend 0, so the hinge IS the forearm and the cock is
+    // exactly 90° — the bit-identical idle path.
     for (const hand of ['right', 'left']) {
       const j = make();
       const r = solve(j, hand);
@@ -350,6 +389,7 @@ const runSeq = (solver, seq, hand = 'right') => {
     out.push({
       ok,
       pos: pos.clone(),
+      batX: new THREE.Vector3(1, 0, 0).applyQuaternion(quat),
       batY: new THREE.Vector3(0, 1, 0).applyQuaternion(quat),
       blend: solver.swingBlend,
     });
@@ -357,19 +397,31 @@ const runSeq = (solver, seq, hand = 'right') => {
   return out;
 };
 
-report('fast downward wrist motion sweeps the blade below horizontal', () => {
+report('fast downward wrist motion uncocks the blade below horizontal', () => {
   const s = new BatTransformSolver();
   const seq = swingSeq(8, [0.18, 0.55, -0.30], [0.16, -0.10, -0.34]); // ~2.8 u/s down
   const r = runSeq(s, seq);
   assert.ok(r.every((f) => f.ok), 'solve failed mid-swing');
   for (let i = 0; i < seq.length; i++) {
-    const fa = new THREE.Vector3().subVectors(seq[i].rWrist, seq[i].rElbow).normalize();
-    assert.ok(Math.abs(r[i].batY.dot(fa)) < PERP_TOL, `frame ${i}: |blade.forearm| ${r[i].batY.dot(fa)}`);
+    // Every frame: the blade sits at exactly the phase-aware cock angle
+    // against the two-segment hinge (the forearm whenever the elbow is
+    // straight that frame); at rest the basis X IS the hinge axis.
+    const h = hingeOf(seq[i], 'right');
+    const cock = degOf(r[i].batY, h);
+    assert.ok(Math.abs(cock - cockDegOf(r[i].blend)) < 1e-4,
+      `frame ${i}: cock ${cock} != ${cockDegOf(r[i].blend)} (blend ${r[i].blend})`);
+    if (r[i].blend === 0) {
+      assert.ok(r[i].batX.distanceTo(h) < 1e-9, `frame ${i}: rest grip axis != hinge`);
+    }
   }
   assert.ok(r[0].batY.y > 0, `first frame blade should start up (${r[0].batY.y})`);
   const last = r[seq.length - 1];
   assert.ok(last.blend > 0.7, `blend should be high by the downswing (${last.blend})`);
   assert.ok(last.batY.y < -0.2, `final blade should point down (${last.batY.y})`);
+  // Deep into the downswing the bat is well past perpendicular toward
+  // the arm's extension — never the old rigid 90° lock.
+  const lastCock = degOf(last.batY, hingeOf(seq[seq.length - 1], 'right'));
+  assert.ok(lastCock < 45, `downswing cock should be toward impact (${lastCock})`);
   assert.ok(last.pos.distanceTo(seq[seq.length - 1].rWrist) < 1e-12, 'anchor drift mid-swing');
 });
 
@@ -517,6 +569,103 @@ report('forearm swept through the up-parallel band: blade never jumps', () => {
   // Arm fully down (deep fallback): blade horizontal, leaning chest-forward.
   const fwd = new THREE.Vector3().crossVectors(bodyUpOf(j), new THREE.Vector3().subVectors(j.rShoulder, j.lShoulder).normalize()).normalize();
   assert.ok(prevY.dot(fwd) > 0.8, `fully-down arm should point the blade forward (${prevY.dot(fwd)})`);
+});
+
+console.log('\n--- two-segment hinge (elbow flex carries the blade) ---');
+
+/** Symmetric tucked-elbow stance: interior elbow angle ~90°, hinge fully engaged. */
+const tuckedJoints = () => ({
+  lShoulder: v(-0.20, 0.55, 0), rShoulder: v(0.20, 0.55, 0),
+  lElbow: v(-0.30, 0.38, -0.02), rElbow: v(0.30, 0.38, -0.02),
+  lWrist: v(-0.16, 0.46, -0.24), rWrist: v(0.16, 0.46, -0.24),
+  lHip: v(-0.12, 0.0, -0.02), rHip: v(0.12, 0.0, -0.02),
+});
+
+report('tucked elbow: grip axis is the forearm/upper-arm hinge, not the bare forearm', () => {
+  const j = tuckedJoints();
+  for (const hand of ['right', 'left']) {
+    const r = solve(j, hand);
+    assert.ok(r.ok, `${hand} solve failed`);
+    const h = hingeOf(j, hand);
+    assert.ok(r.batX.distanceTo(h) < 1e-9, `${hand}: grip axis != hinge`);
+    assert.ok(r.batX.distanceTo(forearmOf(j, hand)) > 1e-3,
+      `${hand}: hinge should visibly leave the forearm when the elbow is tucked`);
+  }
+});
+report('tucked elbow at rest: blade exactly perpendicular to the hinge', () => {
+  const j = tuckedJoints();
+  for (const hand of ['right', 'left']) {
+    const r = solve(j, hand);
+    const dot = r.batY.dot(hingeOf(j, hand));
+    assert.ok(Math.abs(dot) < PERP_TOL, `${hand}: |blade.hinge| ${dot}`);
+    assert.ok(r.pos.distanceTo(wristOf(j, hand)) < 1e-12, `${hand}: anchor drift`);
+  }
+});
+report('straight arm: hinge is bit-identical to the forearm axis', () => {
+  for (const [name, make] of POSES) {
+    const j = make();
+    for (const hand of ['right', 'left']) {
+      const r = solve(j, hand);
+      assert.ok(r.ok, `${hand} solve failed`);
+      assert.ok(r.batX.distanceTo(forearmOf(j, hand)) < CLOSE_TOL,
+        `${name} ${hand}: hinge drifted from the forearm on a straight arm`);
+    }
+  }
+});
+report('elbow flex moves the grip axis even with the forearm held fixed', () => {
+  // Chris's "bat moves with the upper arm AND lower arm": the grip axis
+  // is the hinge (independent of the body reference), so rotating the
+  // upper arm about the elbow must carry it even at a frozen forearm.
+  const j = tuckedJoints();
+  const axisBefore = solve(j, 'right').batX.clone();
+  const forearmBefore = forearmOf(j, 'right');
+  j.rShoulder = v(0.20, 0.42, 0.10); // rotate the upper arm about the elbow
+  const r = solve(j, 'right');
+  assert.ok(r.ok, 'solve failed');
+  assert.ok(forearmOf(j, 'right').distanceTo(forearmBefore) < 1e-12, 'setup: forearm moved');
+  assert.ok(degOf(axisBefore, r.batX) > 2,
+    `grip axis ignored the upper arm (moved ${degOf(axisBefore, r.batX)} deg)`);
+  assert.ok(Math.abs(r.batY.dot(hingeOf(j, 'right'))) < PERP_TOL, 'blade left the hinge plane');
+});
+
+console.log('\n--- research-pinned wrist cock (McErlain-Naylor 2021; Peploe 2019) ---');
+
+/** Fast sustained downswing: ~2.6 u/s of downward wrist speed for 18
+ *  pose frames — saturates the blend. Starts from a full backlift tuck
+ *  (elbow ~30 deg: hinge fully engaged) and extends through impact. */
+const fastDownswing = () => swingSeq(18, [0.18, 1.20, -0.30], [0.16, -0.30, -0.40]);
+
+report('full downswing ends at the measured impact cock (15 deg +/- 2)', () => {
+  const s = new BatTransformSolver();
+  const seq = fastDownswing();
+  const r = runSeq(s, seq);
+  const last = r[r.length - 1];
+  assert.ok(last.blend > 0.97, `blend should saturate (${last.blend})`);
+  const cock = degOf(last.batY, hingeOf(seq[seq.length - 1], 'right'));
+  // Interior wrist cocking at impact: 162.1 +/- 8.5 (M), 168.9 +/- 10.4
+  // (F) -> 180 - 165 = 15 deg from the arm, the bat a near-extension.
+  assert.ok(Math.abs(cock - 15) < 2, `impact cock ${cock} deg (research pin 15)`);
+});
+report('early downswing passes through the measured lag zone (75 deg +/- 2)', () => {
+  const s = new BatTransformSolver();
+  const seq = fastDownswing();
+  const r = runSeq(s, seq);
+  // The frame nearest blend 0.3 must sit at the lag peak: the studies'
+  // minimum wrist cocking (~105 deg interior) during the downswing.
+  let best = -1;
+  for (let i = 0; i < r.length; i++) {
+    if (best < 0 || Math.abs(r[i].blend - LAG_BLEND_END) < Math.abs(r[best].blend - LAG_BLEND_END)) best = i;
+  }
+  assert.ok(Math.abs(r[best].blend - LAG_BLEND_END) < 0.15, `no frame near the lag point (${r[best].blend})`);
+  const cock = degOf(r[best].batY, hingeOf(seq[best], 'right'));
+  assert.ok(Math.abs(cock - 75) < 2, `lag cock ${cock} deg (research pin 75)`);
+});
+report('uncocking span across the downswing matches the measured 57.5-61.9 deg', () => {
+  // cock(0.3) - cock(1) = 75 - 15 = 60 deg: the studies' wrist
+  // uncocking from minimum angle to impact (57.5 +/- 14.7 M /
+  // 61.9 +/- 14.4 F) — the blade's whip contribution to bat speed.
+  const span = cockDegOf(LAG_BLEND_END) - cockDegOf(1);
+  assert.ok(span >= 57.5 && span <= 61.9, `uncocking span ${span} deg`);
 });
 
 console.log(failures === 0 ? '\nAll bat-orientation sanity checks passed.\n' : `\n${failures} check(s) FAILED.\n`);

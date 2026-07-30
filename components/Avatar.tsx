@@ -235,12 +235,15 @@ export const Avatar: React.FC<AvatarProps> = ({
     poseJoint('midHip', midHip, 0.07);
 
     // Grip-anchored bat transform: hang the bat off the SELECTED wrist
-    // (right/left per stance), blade exactly 90° against that forearm —
-    // never the old two-wrist cross, which floated the grip between the
-    // arms and could mirror the blade toward the wrong side. The bat is
-    // bound rigidly to the arm: solve() runs on the same smoothed joints
-    // the bones just consumed, in this same render frame, and its output
-    // is applied unfiltered — shot detection reads this exact transform
+    // (right/left per stance), blade held against the arm's two-segment
+    // hinge (forearm, borrowing the upper arm as the elbow tucks) at the
+    // phase-aware wrist cock — 90° at rest, uncocking through the
+    // downswing per the swingBlend state machine — never the old
+    // two-wrist cross, which floated the grip between the arms and could
+    // mirror the blade toward the wrong side. The bat is bound rigidly
+    // to the arm: solve() runs on the same smoothed joints the bones
+    // just consumed, in this same render frame, and its output is
+    // applied unfiltered — shot detection reads this exact transform
     // via the kinematic body below. A degenerate frame keeps the last
     // good transform (solve() leaves the scratch untouched).
     const hand = stance === Stance.RIGHT ? ('right' as const) : ('left' as const);
@@ -278,9 +281,11 @@ export const Avatar: React.FC<AvatarProps> = ({
     }
 
     // Rigid binding: the solved transform IS the bat's transform for this
-    // render frame — no downstream damper, so the bat's angular delta per
-    // frame equals the forearm's by construction (batX is the forearm
-    // axis; the anchor is the wrist, copied exactly).
+    // render frame — no downstream damper, so the bat is a pure function
+    // of the same smoothed joints plus the declared swingBlend state (at
+    // rest batX is the forearm/upper-arm hinge axis and the frame's
+    // angular delta equals the hinge's; the anchor is the wrist, copied
+    // exactly).
     batSolver.solve(batJoints, hand, batPos, targetQuat);
 
     if (visualBatRef.current) {
