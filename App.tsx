@@ -7,6 +7,7 @@ import { GameState, GameMode, PoseLandmarkFrame, PoseResults, ShotResult, GameSt
 import { FAMOUS_DELIVERIES } from './data/famousDeliveries';
 import { getCoachingTips } from './data/coaching';
 import { generateCommentary, generateCoachingInsight } from './services/geminiService';
+import { startAmbient, stopAmbient } from './services/ambientAudio';
 import { sampleFrame, detectTrackingMode, adaptSeatedLandmarks, MODE_WINDOW_FRAMES, FrameSample } from './services/trackingMode';
 import {
   LandmarkSmoother,
@@ -105,6 +106,13 @@ const App: React.FC = () => {
   useEffect(() => { trackingModeRef.current = trackingMode; }, [trackingMode]);
   useEffect(() => { gameStateRef.current = gameState; }, [gameState]);
 
+  // Ambient crowd noise loops only while an innings is live; it starts from
+  // the PLAY BALL gesture (startGame) and stops on innings end / unmount.
+  useEffect(() => {
+    if (gameState !== GameState.BATTING) stopAmbient();
+  }, [gameState]);
+  useEffect(() => () => stopAmbient(), []);
+
   const handlePoseUpdate = useCallback((results: PoseResults) => {
     if (!smoothersRef.current) {
       smoothersRef.current = {
@@ -175,6 +183,9 @@ const App: React.FC = () => {
       : trackingModeRef.current;
     activeModeRef.current = resolved;
     setActiveMode(resolved);
+
+    // User gesture: start the looping crowd ambience (autoplay-safe).
+    startAmbient();
 
     setGameState(GameState.BATTING);
     setDeliveryIndex(0);
@@ -304,10 +315,18 @@ const App: React.FC = () => {
           {gameState === GameState.FINISHED && (
               <ResultCard history={history} onPlayAgain={startGame} />
           )}
+
+          {/* Play-by-play commentary — top of window, below the delivery
+              banner, so it no longer covers the pitch at the bottom. */}
+          <div className="bg-black/60 p-6 rounded-2xl border border-blue-500/30 w-full max-w-2xl backdrop-blur-md shadow-2xl min-h-[90px] flex items-center justify-center">
+              <p className="text-xl italic text-center text-blue-100 font-light leading-snug">
+                  "{stats.commentary}"
+              </p>
+          </div>
         </div>
 
         {/* Center Content: Menu with Calibration */}
-        <div className="pointer-events-auto flex flex-col items-center justify-center py-10">
+        <div className="pointer-events-auto flex flex-1 flex-col items-center justify-center py-10">
             {gameState === GameState.MENU && (
                 <div className="bg-black/90 p-8 rounded-3xl border border-yellow-500/50 text-center max-w-lg shadow-2xl backdrop-blur-xl">
                     <h2 className="text-4xl font-extrabold mb-2 text-yellow-500 italic tracking-tighter uppercase">Calibration</h2>
@@ -420,15 +439,6 @@ const App: React.FC = () => {
                     </button>
                 </div>
             )}
-        </div>
-
-        {/* Footer: Commentary */}
-        <div className="w-full flex justify-center pb-8">
-            <div className="bg-black/60 p-6 rounded-2xl border border-blue-500/30 w-full max-w-2xl backdrop-blur-md shadow-2xl min-h-[90px] flex items-center justify-center">
-                <p className="text-xl italic text-center text-blue-100 font-light leading-snug">
-                    "{stats.commentary}"
-                </p>
-            </div>
         </div>
 
         {/* Commentary overlay (educational / coaching / off) — self-hides when not batting */}

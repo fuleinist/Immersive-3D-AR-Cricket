@@ -44,10 +44,11 @@ const outcomeLabel = (record: BallRecord): string => {
 };
 
 /**
- * Dismissible commentary panel anchored to the left edge (clear of the
- * scoreboard, delivery banner, webcam preview and footer commentary).
- * EDUCATIONAL: scripted story/physics of the famous delivery.
- * COACHING: deterministic per-shot tips from pitch + bat data.
+ * Dismissible commentary panel docked to the TOP-RIGHT of the window,
+ * below the transient last-shot card (clear of the scoreboard + tracking
+ * badge top-left, the centered delivery banner, and the bottom-right
+ * webcam preview). EDUCATIONAL: scripted story/physics of the famous
+ * delivery. COACHING: deterministic per-shot tips from pitch + bat data.
  * Hidden outside BATTING so it never competes with the ResultCard.
  */
 export const CommentaryOverlay: React.FC<CommentaryOverlayProps> = ({ gameState, delivery, lastBall, aiCoaching }) => {
@@ -80,7 +81,7 @@ export const CommentaryOverlay: React.FC<CommentaryOverlayProps> = ({ gameState,
 
   if (mode === CommentaryMode.OFF) {
     return (
-      <div className="absolute left-6 top-1/2 -translate-y-1/2 pointer-events-auto">
+      <div className="absolute right-6 top-36 pointer-events-auto">
         <ModeSwitch mode={mode} onChange={setMode} />
       </div>
     );
@@ -90,7 +91,7 @@ export const CommentaryOverlay: React.FC<CommentaryOverlayProps> = ({ gameState,
 
   return (
     <div
-      className={`absolute left-6 top-1/2 -translate-y-1/2 w-80 max-w-[calc(100vw-3rem)] max-h-[60vh] overflow-y-auto pointer-events-auto bg-black/70 backdrop-blur-md rounded-2xl border ${accent} shadow-2xl p-4`}
+      className={`absolute right-6 top-36 w-80 max-w-[calc(100vw-3rem)] max-h-[60vh] overflow-y-auto pointer-events-auto bg-black/70 backdrop-blur-md rounded-2xl border ${accent} shadow-2xl p-4`}
       role="complementary"
       aria-label="Commentary"
     >
