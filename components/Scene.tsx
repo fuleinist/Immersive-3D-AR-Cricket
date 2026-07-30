@@ -66,7 +66,14 @@ export const Scene: React.FC<SceneProps> = ({
   const shouldShowAvatar = gameState === GameState.MENU || gameState === GameState.BATTING || gameState === GameState.FINISHED;
 
   return (
-    <Canvas shadows dpr={[1, 2]} gl={{ alpha: true }}>
+    // dpr capped at 1.5: dpr 2 quadruples fragment work on retina displays
+    // for a barely-perceptible edge difference with antialiasing on. Stencil
+    // is unused by this scene; high-performance nudges discrete GPUs on.
+    <Canvas
+      shadows
+      dpr={[1, 1.5]}
+      gl={{ alpha: true, antialias: true, stencil: false, powerPreference: 'high-performance' }}
+    >
       <PerspectiveCamera makeDefault position={[0, 1.8, 6]} fov={45} />
       
       <ambientLight intensity={0.7} />
@@ -98,7 +105,9 @@ export const Scene: React.FC<SceneProps> = ({
         <Pitch />
       </Physics>
 
-      <ContactShadows opacity={0.3} scale={20} blur={2} far={10} resolution={512} color="#000000" />
+      {/* Contact shadows re-render the whole scene from below every frame;
+          256px is ample under blur=2 (was 512 — 4x the shadow-pass cost). */}
+      <ContactShadows opacity={0.3} scale={20} blur={2} far={10} resolution={256} color="#000000" />
     </Canvas>
   );
 };

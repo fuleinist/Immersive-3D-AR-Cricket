@@ -3,7 +3,7 @@ import { WebcamPose } from './components/WebcamPose';
 import { Scene } from './components/Scene';
 import { ResultCard } from './components/ResultCard';
 import { CommentaryOverlay } from './components/CommentaryOverlay';
-import { GameState, GameMode, PoseLandmarkFrame, PoseResults, ShotResult, GameStats, Stance, BallRecord, AiCoachingNote, TrackingMode, ResolvedTrackingMode } from './types';
+import { GameState, GameMode, Landmark, PoseLandmarkFrame, PoseResults, ShotResult, GameStats, Stance, BallRecord, AiCoachingNote, TrackingMode, ResolvedTrackingMode } from './types';
 import { FAMOUS_DELIVERIES } from './data/famousDeliveries';
 import { getCoachingTips } from './data/coaching';
 import { generateCommentary, generateCoachingInsight } from './services/geminiService';
@@ -27,6 +27,12 @@ import {
 // table at construction.
 const IMAGE_OVERRIDES = buildLandmarkOverrides(33, BAT_FRAME_LANDMARKS, IMAGE_SPACE_ARM_SMOOTHING, IMAGE_SPACE_SMOOTHING);
 const WORLD_OVERRIDES = buildLandmarkOverrides(33, BAT_FRAME_LANDMARKS, WORLD_SPACE_ARM_SMOOTHING, WORLD_SPACE_SMOOTHING);
+
+// Preallocated landmark buffer for the seated adaptation (sit mode ran a
+// 33-object allocation every pose frame; the avatar only reads the buffer,
+// so in-place reuse is safe).
+const makeLandmarkScratch = (): Landmark[] =>
+  Array.from({ length: 33 }, () => ({ x: 0, y: 0, z: 0, visibility: 0 }));
 
 // Scripted local commentary — the default experience (Gemini is optional)
 const LOCAL_COMMENTARY: Record<ShotResult, string[]> = {
@@ -109,6 +115,7 @@ const App: React.FC = () => {
   // Ref mirrors so handlePoseUpdate can stay identity-stable — WebcamPose
   // re-initializes the camera whenever the callback identity changes.
   const modeSamplesRef = useRef<FrameSample[]>([]);
+  const seatedScratchRef = useRef<Landmark[] | null>(null);
   const activeModeRef = useRef<ResolvedTrackingMode>(TrackingMode.STANDING);
   const trackingModeRef = useRef<TrackingMode>(trackingMode);
   const gameStateRef = useRef<GameState>(gameState);
@@ -172,13 +179,16 @@ const App: React.FC = () => {
       lateralOffsetRef.current = lateralTrackerRef.current.update(midShoulderX, shoulderVis, dtPose);
     }
 
-    // Rolling calibration window for seated/standing detection.
-    const sample = sampleFrame(results.poseLandmarks);
+    // Rolling calibration window for seated/standing detection. When the
+    // window is full the oldest sample object is recycled for the new
+    // sample (shifted out, then pushed back at the tail) — no per-frame
+    // sample allocation; a null sample leaves the window untouched.
+    const samples = modeSamplesRef.current;
+    const atCapacity = samples.length >= MODE_WINDOW_FRAMES;
+    const sample = sampleFrame(results.poseLandmarks, atCapacity ? samples[0] : undefined);
     if (sample) {
-      modeSamplesRef.current.push(sample);
-      if (modeSamplesRef.current.length > MODE_WINDOW_FRAMES) {
-        modeSamplesRef.current.shift();
-      }
+      if (atCapacity) samples.shift();
+      samples.push(sample);
     }
 
     // Resolve continuously outside of play so the menu avatar + calibration
@@ -201,9 +211,15 @@ const App: React.FC = () => {
       // pose to synthetic hips, scales it to anatomical meters and swaps in
       // a synthetic standing lower body — emitting the same hip-anchored
       // metric space the renderer consumes in standing mode, so the avatar
-      // keeps the same ground plane and framing either way.
+      // keeps the same ground plane and framing either way. Writes into the
+      // preallocated scratch buffer (a degenerate frame returns the input
+      // instead, exactly as before).
+      if (!seatedScratchRef.current) seatedScratchRef.current = makeLandmarkScratch();
       const frame = framesRef.current.world;
-      frame.landmarks = adaptSeatedLandmarks(results.poseLandmarks ?? results.poseWorldLandmarks);
+      frame.landmarks = adaptSeatedLandmarks(
+        results.poseLandmarks ?? results.poseWorldLandmarks,
+        seatedScratchRef.current,
+      );
       poseLandmarksRef.current = frame;
     } else if (results.poseWorldLandmarks) {
       const frame = framesRef.current.world;
