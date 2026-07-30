@@ -3,6 +3,7 @@ import { WebcamPose } from './components/WebcamPose';
 import { Scene } from './components/Scene';
 import { ResultCard } from './components/ResultCard';
 import { CommentaryOverlay } from './components/CommentaryOverlay';
+import { GitHubLink } from './components/GitHubLink';
 import { GameState, GameMode, Landmark, PoseLandmarkFrame, PoseResults, ShotResult, GameStats, Stance, BallRecord, AiCoachingNote, TrackingMode, ResolvedTrackingMode } from './types';
 import { FAMOUS_DELIVERIES } from './data/famousDeliveries';
 import { getCoachingTips } from './data/coaching';
@@ -315,6 +316,7 @@ const App: React.FC = () => {
 
   return (
     <div className="relative w-full h-screen bg-gray-950 overflow-hidden text-white font-sans">
+      <GitHubLink />
       <WebcamPose onPoseUpdate={handlePoseUpdate} showVideo={gameState !== GameState.MENU} />
 
       <div className="absolute top-0 left-0 w-full h-full z-10">
