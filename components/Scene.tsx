@@ -4,11 +4,11 @@ import { Physics, usePlane, useCylinder } from '@react-three/cannon';
 import { Environment, PerspectiveCamera, ContactShadows } from '@react-three/drei';
 import { Avatar } from './Avatar';
 import { Ball } from './Ball';
-import { Landmark, GameState, GameMode, ShotResult, Stance, DeliveryScript } from '../types';
+import { PoseLandmarkFrame, GameState, GameMode, ShotResult, Stance, DeliveryScript } from '../types';
 import { Vector3, Mesh } from 'three';
 
 interface SceneProps {
-  poseLandmarks: React.MutableRefObject<Landmark[] | null>;
+  poseLandmarks: React.MutableRefObject<PoseLandmarkFrame | null>;
   gameState: GameState;
   stance: Stance;
   gameMode: GameMode;

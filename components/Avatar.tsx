@@ -2,10 +2,11 @@ import React, { useRef, useMemo } from 'react';
 import { useFrame } from '@react-three/fiber';
 import { useBox } from '@react-three/cannon';
 import * as THREE from 'three';
-import { Landmark, Stance, GameMode } from '../types';
+import { Landmark, PoseLandmarkFrame, Stance, GameMode } from '../types';
+import { BatTransformSmoother } from '../services/batSmoothing';
 
 interface AvatarProps {
-  landmarks: React.MutableRefObject<Landmark[] | null>;
+  landmarks: React.MutableRefObject<PoseLandmarkFrame | null>;
   stance: Stance;
   gameMode: GameMode;
   size?: number;
@@ -80,7 +81,35 @@ export const Avatar: React.FC<AvatarProps> = ({
 
   const defaultPose = useMemo(() => GET_DEFAULT_POSE(stance === Stance.RIGHT), [stance]);
   const lateralBase = stance === Stance.RIGHT ? 0.45 : -0.45;
-  const creaseZ = 1.35; 
+  const creaseZ = 1.35;
+
+  // Preallocated per-frame scratch: the pose update runs every render frame,
+  // so nothing in the hot path may allocate.
+  const scratch = useMemo(() => ({
+    headPos: new THREE.Vector3(),
+    lShoulder: new THREE.Vector3(), rShoulder: new THREE.Vector3(),
+    lElbow: new THREE.Vector3(), rElbow: new THREE.Vector3(),
+    lWrist: new THREE.Vector3(), rWrist: new THREE.Vector3(),
+    lHip: new THREE.Vector3(), rHip: new THREE.Vector3(),
+    lKnee: new THREE.Vector3(), rKnee: new THREE.Vector3(),
+    lAnkle: new THREE.Vector3(), rAnkle: new THREE.Vector3(),
+    midShoulder: new THREE.Vector3(), midHip: new THREE.Vector3(),
+    midWrist: new THREE.Vector3(), wristDiff: new THREE.Vector3(),
+    forearmDir: new THREE.Vector3(), batForward: new THREE.Vector3(),
+    batToeDir: new THREE.Vector3(), batX: new THREE.Vector3(),
+    boneDir: new THREE.Vector3(),
+    batMatrix: new THREE.Matrix4(),
+    targetQuat: new THREE.Quaternion(),
+    dampedPos: new THREE.Vector3(), dampedQuat: new THREE.Quaternion(),
+    worldPos: new THREE.Vector3(), worldQuat: new THREE.Quaternion(),
+    euler: new THREE.Euler(),
+    up: new THREE.Vector3(0, 1, 0),
+  }), []);
+
+  // Derived-level bat damper: smooths the computed bat transform itself
+  // (position + orientation), which landmark smoothing alone cannot steady
+  // because the orientation comes from a cross of two difference vectors.
+  const batSmoother = useMemo(() => new BatTransformSmoother(), []);
 
   const poseJoint = (key: string, pos: THREE.Vector3, radius: number) => {
     const mesh = jointsRef.current[key];
@@ -92,7 +121,7 @@ export const Avatar: React.FC<AvatarProps> = ({
 
   const poseBone = (mesh: THREE.Mesh | null, p1: THREE.Vector3, p2: THREE.Vector3, thickness: number) => {
     if (!mesh) return;
-    const direction = new THREE.Vector3().subVectors(p2, p1);
+    const direction = scratch.boneDir.subVectors(p2, p1);
     const length = direction.length();
     if (length < 0.01) {
       mesh.visible = false;
@@ -100,41 +129,45 @@ export const Avatar: React.FC<AvatarProps> = ({
     }
     mesh.visible = true;
     mesh.scale.set(thickness * size, length, thickness * size);
-    mesh.position.copy(p1).add(direction.clone().multiplyScalar(0.5));
-    mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.clone().normalize());
+    mesh.position.copy(p1).addScaledVector(direction, 0.5);
+    mesh.quaternion.setFromUnitVectors(scratch.up, direction.divideScalar(length));
   };
 
-  useFrame(() => {
-    const l = (landmarks.current && landmarks.current.length >= 33) ? landmarks.current : defaultPose;
-    
-    const getPos = (idx: number) => {
+  useFrame((_, delta) => {
+    const frame = landmarks.current;
+    const hasPose = !!frame && frame.landmarks.length >= 33;
+    const l = hasPose ? frame.landmarks : defaultPose;
+    // The pipeline tags every frame with its coordinate space — the avatar
+    // never guesses. The default pose is authored in world convention.
+    const space = hasPose ? frame.space : 'world';
+    const {
+      headPos, lShoulder, rShoulder, lElbow, rElbow, lWrist, rWrist,
+      lHip, rHip, lKnee, rKnee, lAnkle, rAnkle, midShoulder, midHip,
+      midWrist, wristDiff, forearmDir, batForward, batToeDir, batX,
+      batMatrix, targetQuat, dampedPos, dampedQuat, worldPos, worldQuat, euler,
+    } = scratch;
+
+    const getPos = (idx: number, out: THREE.Vector3) => {
       const raw = l[idx];
-      const isWorld = Math.abs(raw.x) < 5 && Math.abs(raw.y) < 5 && (Math.abs(raw.x) > 0.001 || Math.abs(raw.y) > 0.001);
-      if (isWorld) {
-        return new THREE.Vector3(raw.x * size, -raw.y * size, -raw.z * size);
+      if (space === 'world') {
+        out.set(raw.x * size, -raw.y * size, -raw.z * size);
       } else {
-        return new THREE.Vector3((raw.x - 0.5) * 1.8 * size, (0.5 - raw.y) * 2.2 * size, -raw.z * size);
+        out.set((raw.x - 0.5) * 1.8 * size, (0.5 - raw.y) * 2.2 * size, -raw.z * size);
       }
     };
 
-    const headPos = getPos(0);
-    const lShoulder = getPos(11);
-    const rShoulder = getPos(12);
-    const lElbow = getPos(13);
-    const rElbow = getPos(14);
-    const lWrist = getPos(15);
-    const rWrist = getPos(16);
-    const lHip = getPos(23);
-    const rHip = getPos(24);
-    const lKnee = getPos(25);
-    const rKnee = getPos(26);
-    const lAnkle = getPos(27);
-    const rAnkle = getPos(28);
+    getPos(0, headPos);
+    getPos(11, lShoulder); getPos(12, rShoulder);
+    getPos(13, lElbow); getPos(14, rElbow);
+    getPos(15, lWrist); getPos(16, rWrist);
+    getPos(23, lHip); getPos(24, rHip);
+    getPos(25, lKnee); getPos(26, rKnee);
+    getPos(27, lAnkle); getPos(28, rAnkle);
 
     if (headRef.current) headRef.current.position.copy(headPos);
 
-    const midShoulder = new THREE.Vector3().addVectors(lShoulder, rShoulder).multiplyScalar(0.5);
-    const midHip = new THREE.Vector3().addVectors(lHip, rHip).multiplyScalar(0.5);
+    midShoulder.addVectors(lShoulder, rShoulder).multiplyScalar(0.5);
+    midHip.addVectors(lHip, rHip).multiplyScalar(0.5);
 
     poseBone(torsoRef.current, midShoulder, midHip, 0.18);
     poseBone(lUpperArmRef.current, lShoulder, lElbow, 0.045);
@@ -161,25 +194,28 @@ export const Avatar: React.FC<AvatarProps> = ({
     poseJoint('midShoulder', midShoulder, 0.06);
     poseJoint('midHip', midHip, 0.07);
 
-    const midWrist = new THREE.Vector3().addVectors(lWrist, rWrist).multiplyScalar(0.5);
-    const wristDiff = new THREE.Vector3().subVectors(lWrist, rWrist).normalize();
-    const forearmDir = new THREE.Vector3().subVectors(midWrist, midShoulder).normalize();
-    const batForward = new THREE.Vector3().crossVectors(wristDiff, forearmDir).normalize();
-    const batToeDir = new THREE.Vector3().crossVectors(wristDiff, batForward).normalize();
+    midWrist.addVectors(lWrist, rWrist).multiplyScalar(0.5);
+    wristDiff.subVectors(lWrist, rWrist).normalize();
+    forearmDir.subVectors(midWrist, midShoulder).normalize();
+    batForward.crossVectors(wristDiff, forearmDir).normalize();
+    batToeDir.crossVectors(wristDiff, batForward).normalize();
+    batX.crossVectors(batToeDir, batForward).normalize();
+    batMatrix.makeBasis(batX, batToeDir, batForward);
+    targetQuat.setFromRotationMatrix(batMatrix);
+
+    // Damp the DERIVED transform (adaptive 1€ on position, slerp on
+    // orientation). Shot detection reads the same damped transform via the
+    // kinematic body below, so bat-velocity estimates inherit the damping.
+    batSmoother.filter(midWrist, targetQuat, delta, dampedPos, dampedQuat);
 
     if (visualBatRef.current) {
-      visualBatRef.current.position.copy(midWrist);
-      const matrix = new THREE.Matrix4();
-      const batX = new THREE.Vector3().crossVectors(batToeDir, batForward).normalize();
-      matrix.makeBasis(batX, batToeDir, batForward);
-      visualBatRef.current.quaternion.setFromRotationMatrix(matrix);
+      visualBatRef.current.position.copy(dampedPos);
+      visualBatRef.current.quaternion.copy(dampedQuat);
 
-      const worldPos = new THREE.Vector3();
-      const worldQuat = new THREE.Quaternion();
       visualBatRef.current.getWorldPosition(worldPos);
       visualBatRef.current.getWorldQuaternion(worldQuat);
       batApi.position.set(worldPos.x, worldPos.y, worldPos.z);
-      const euler = new THREE.Euler().setFromQuaternion(worldQuat);
+      euler.setFromQuaternion(worldQuat);
       batApi.rotation.set(euler.x, euler.y, euler.z);
     }
   });

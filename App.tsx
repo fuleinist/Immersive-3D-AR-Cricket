@@ -3,12 +3,26 @@ import { WebcamPose } from './components/WebcamPose';
 import { Scene } from './components/Scene';
 import { ResultCard } from './components/ResultCard';
 import { CommentaryOverlay } from './components/CommentaryOverlay';
-import { GameState, GameMode, Landmark, PoseResults, ShotResult, GameStats, Stance, BallRecord, AiCoachingNote, TrackingMode, ResolvedTrackingMode } from './types';
+import { GameState, GameMode, PoseLandmarkFrame, PoseResults, ShotResult, GameStats, Stance, BallRecord, AiCoachingNote, TrackingMode, ResolvedTrackingMode } from './types';
 import { FAMOUS_DELIVERIES } from './data/famousDeliveries';
 import { getCoachingTips } from './data/coaching';
 import { generateCommentary, generateCoachingInsight } from './services/geminiService';
 import { sampleFrame, detectTrackingMode, adaptSeatedLandmarks, MODE_WINDOW_FRAMES, FrameSample } from './services/trackingMode';
-import { LandmarkSmoother, IMAGE_SPACE_SMOOTHING, WORLD_SPACE_SMOOTHING } from './services/poseSmoothing';
+import {
+  LandmarkSmoother,
+  IMAGE_SPACE_SMOOTHING,
+  IMAGE_SPACE_ARM_SMOOTHING,
+  WORLD_SPACE_SMOOTHING,
+  WORLD_SPACE_ARM_SMOOTHING,
+  UPPER_BODY_LANDMARKS,
+  buildLandmarkOverrides,
+} from './services/poseSmoothing';
+
+// Per-landmark filter profiles: the bat-driving arm chain (shoulders,
+// elbows, wrists) gets the stronger variant; everything else uses the base
+// profile. Built once — LandmarkSmoother reads the table at construction.
+const IMAGE_OVERRIDES = buildLandmarkOverrides(33, UPPER_BODY_LANDMARKS, IMAGE_SPACE_ARM_SMOOTHING, IMAGE_SPACE_SMOOTHING);
+const WORLD_OVERRIDES = buildLandmarkOverrides(33, UPPER_BODY_LANDMARKS, WORLD_SPACE_ARM_SMOOTHING, WORLD_SPACE_SMOOTHING);
 
 // Scripted local commentary — the default experience (Gemini is optional)
 const LOCAL_COMMENTARY: Record<ShotResult, string[]> = {
@@ -66,7 +80,14 @@ const App: React.FC = () => {
 
   const [resetTrigger, setResetTrigger] = useState(0);
 
-  const poseLandmarksRef = useRef< Landmark[] | null>(null);
+  const poseLandmarksRef = useRef<PoseLandmarkFrame | null>(null);
+
+  // Reusable frame payloads — the renderer's ref is swapped per pose frame,
+  // so the wrapper objects are preallocated to avoid per-frame churn.
+  const framesRef = useRef<{ world: PoseLandmarkFrame; image: PoseLandmarkFrame }>({
+    world: { landmarks: [], space: 'world' },
+    image: { landmarks: [], space: 'image' },
+  });
 
   // One Euro smoothers, one per landmark space. Both streams are filtered
   // unconditionally so switching tracking modes never hits stale filter
@@ -87,8 +108,8 @@ const App: React.FC = () => {
   const handlePoseUpdate = useCallback((results: PoseResults) => {
     if (!smoothersRef.current) {
       smoothersRef.current = {
-        image: new LandmarkSmoother(IMAGE_SPACE_SMOOTHING),
-        world: new LandmarkSmoother(WORLD_SPACE_SMOOTHING),
+        image: new LandmarkSmoother(IMAGE_SPACE_SMOOTHING, 33, IMAGE_OVERRIDES),
+        world: new LandmarkSmoother(WORLD_SPACE_SMOOTHING, 33, WORLD_OVERRIDES),
       };
     }
     const smoothers = smoothersRef.current;
@@ -127,11 +148,22 @@ const App: React.FC = () => {
     if (activeModeRef.current === TrackingMode.SITTING) {
       // Normalized image landmarks: their x/y don't depend on hip estimation,
       // unlike hip-anchored world landmarks which jitter when the player is
-      // seated and the lower body is occluded. Lower body is replaced by a
-      // synthetic seated pose anchored to the live shoulders.
-      poseLandmarksRef.current = adaptSeatedLandmarks(results.poseLandmarks ?? results.poseWorldLandmarks);
+      // seated and the lower body is occluded. The adaptation re-anchors the
+      // pose to synthetic hips, scales it to anatomical meters and swaps in
+      // a synthetic standing lower body — emitting the same hip-anchored
+      // metric space the renderer consumes in standing mode, so the avatar
+      // keeps the same ground plane and framing either way.
+      const frame = framesRef.current.world;
+      frame.landmarks = adaptSeatedLandmarks(results.poseLandmarks ?? results.poseWorldLandmarks);
+      poseLandmarksRef.current = frame;
+    } else if (results.poseWorldLandmarks) {
+      const frame = framesRef.current.world;
+      frame.landmarks = results.poseWorldLandmarks;
+      poseLandmarksRef.current = frame;
     } else {
-      poseLandmarksRef.current = results.poseWorldLandmarks || results.poseLandmarks;
+      const frame = framesRef.current.image;
+      frame.landmarks = results.poseLandmarks;
+      poseLandmarksRef.current = frame;
     }
   }, []);
 
