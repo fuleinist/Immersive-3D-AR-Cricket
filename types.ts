@@ -65,6 +65,8 @@ export interface DeliveryScript {
   year: number;
   styleTag: string;
   description: string;
+  /** Scripted historical explainer: the real story plus the technique/physics. */
+  educational: string;
   speedKmh: number; // headline pace, for display
   pace: number;
   line: number;
@@ -80,4 +82,19 @@ export interface BallRecord {
   runs: number;
   speed: number; // shot speed km/h (0 when beaten/bowled)
   distance: number; // meters
+  /** Pitch-axis position of bat contact; lower = met further in front. Absent when beaten/bowled. */
+  contactZ?: number;
+}
+
+/** User-selectable commentary overlay mode. */
+export enum CommentaryMode {
+  EDUCATIONAL = 'EDUCATIONAL',
+  COACHING = 'COACHING',
+  OFF = 'OFF',
+}
+
+/** Optional AI-enriched coaching note, keyed to the delivery it belongs to. */
+export interface AiCoachingNote {
+  deliveryId: string;
+  text: string;
 }
