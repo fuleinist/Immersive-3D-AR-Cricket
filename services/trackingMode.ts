@@ -19,14 +19,14 @@ export const POSE_INDEX = {
   RIGHT_FOOT_INDEX: 32,
 } as const;
 
-/** Indices replaced with a synthetic seated pose by adaptSeatedLandmarks. */
-const LOWER_BODY_INDICES = [
+/** Indices replaced with a synthetic standing pose by adaptSeatedLandmarks. */
+const LOWER_BODY_INDICES: readonly number[] = [
   POSE_INDEX.LEFT_HIP, POSE_INDEX.RIGHT_HIP,
   POSE_INDEX.LEFT_KNEE, POSE_INDEX.RIGHT_KNEE,
   POSE_INDEX.LEFT_ANKLE, POSE_INDEX.RIGHT_ANKLE,
   POSE_INDEX.LEFT_HEEL, POSE_INDEX.RIGHT_HEEL,
   POSE_INDEX.LEFT_FOOT_INDEX, POSE_INDEX.RIGHT_FOOT_INDEX,
-] as const;
+];
 
 /**
  * Detection window. MediaPipe delivers ~30 pose frames/s, so 45 frames
@@ -53,17 +53,41 @@ const SEATED_DECISION_RATIO = 0.7;
 const MIN_SHOULDER_VISIBILITY = 0.5;
 
 /**
- * Synthetic seated-lower-body proportions, in units of shoulder width.
- * Empirically tuned so the avatar's legs read as "sitting on a chair" for
- * typical webcam framing (head + torso in frame, desk below).
+ * Seated adaptation geometry. The synthetic lower body is a STANDING pose:
+ * sit mode is only an input convenience — the avatar must read as standing
+ * at the crease, framed identically to full-body tracking.
+ *
+ * Distances are in units of shoulder width; multiplied by
+ * SEATED_METRIC_SHOULDER_WIDTH they become the meters used by the
+ * hip-anchored output space (the same convention MediaPipe world landmarks
+ * use: origin at the hips, y DOWN, feet ~0.95 below the hip root).
  */
-const HIP_DROP = 1.4;
-const KNEE_DROP = 1.75;
-const ANKLE_DROP = 2.4;
-const KNEE_FORWARD = 0.9; // knees toward the camera (negative z = closer)
-const ANKLE_FORWARD = 0.7;
+const HIP_DROP = 1.4; // shoulder-mid -> hip-mid; ~= the 0.59m of a real torso
 const HIP_NARROWING = 0.76; // hips slightly narrower than shoulders
+const STANCE_WIDENING = 0.85; // feet slightly wider than hips, athletic stance
+const KNEE_DROP = HIP_DROP + 1.07; // ~0.45m thigh
+const ANKLE_DROP = HIP_DROP + 2.26; // ~0.95m hip->ankle, matches Avatar's default pose
+const KNEE_FORWARD = 0.14; // ~6cm knee flex, z+ toward the viewer
+const HEEL_DROP = ANKLE_DROP + 0.12;
+const HEEL_BACK = 0.14; // heel behind the ankle
+const FOOT_DROP = ANKLE_DROP + 0.17;
+const FOOT_FORWARD = 0.24; // toes in front of the ankle
 const SYNTHETIC_VISIBILITY = 0.9;
+
+/**
+ * Shoulder width the adapted pose is scaled to, in meters. MediaPipe world
+ * landmarks report real meters (~0.4m between shoulder joints), so scaling
+ * the seated pose to the same anatomical constant keeps the avatar the same
+ * visual height across tracking modes.
+ */
+export const SEATED_METRIC_SHOULDER_WIDTH = 0.42;
+
+/** Resulting hip->ankle drop of the synthetic legs, in meters. */
+export const SEATED_METRIC_ANKLE_DEPTH = (ANKLE_DROP - HIP_DROP) * SEATED_METRIC_SHOULDER_WIDTH;
+
+/** Clamp for the shoulder-width-derived scale, guarding degenerate frames. */
+const MIN_ADAPT_SCALE = 0.5;
+const MAX_ADAPT_SCALE = 4.0;
 
 /** Per-frame summary of lower-body trackability, from normalized landmarks. */
 export interface FrameSample {
@@ -185,16 +209,27 @@ export const detectTrackingMode = (samples: FrameSample[]): ModeDetection => {
 };
 
 /**
- * Sit Mode adaptation: return a copy of `landmarks` where the lower body
- * (hips..feet, indices 23-32) is replaced by a synthetic seated pose anchored
- * to the LIVE shoulders. Upper-body landmarks keep their original object
- * references, so wrist/shoulder-driven shot detection sees identical values.
+ * Sit Mode adaptation: return a copy of `landmarks` re-expressed in the same
+ * hip-anchored metric space that MediaPipe world landmarks use (origin at
+ * the hips, y down, meters), with the lower body (indices 23-32) replaced by
+ * a synthetic STANDING pose.
  *
- * Works in either landmark space (normalized image or world meters) because
- * all proportions derive from the shoulder span; callers choose which array
- * to feed. When the shoulders themselves are untracked, the input is returned
- * unchanged — fabricating a body around garbage would look worse than the
- * existing default-pose fallback.
+ * The whole pose is translated so the synthetic hip center sits at the
+ * origin and uniformly scaled so the shoulder span equals
+ * SEATED_METRIC_SHOULDER_WIDTH. Because the transform is a similitude, all
+ * relative upper-body geometry — including the wrist/shoulder direction
+ * vectors the bat orientation derives from — is preserved exactly; only the
+ * absolute anchor and scale change. That is what keeps the avatar on the
+ * same ground plane and at the same visual height as full-body tracking:
+ * the renderer consumes one space convention regardless of tracking mode,
+ * with hips at the root and feet ~0.95m below, instead of mapping raw image
+ * coordinates through the world-landmark path.
+ *
+ * Works in either input landmark space (normalized image or world meters)
+ * because all proportions derive from the shoulder span. When the shoulders
+ * themselves are untracked, the input is returned unchanged — fabricating a
+ * body around garbage would look worse than the existing default-pose
+ * fallback.
  */
 export const adaptSeatedLandmarks = (landmarks: Landmark[]): Landmark[] => {
   if (!landmarks || landmarks.length < 33) return landmarks;
@@ -207,30 +242,45 @@ export const adaptSeatedLandmarks = (landmarks: Landmark[]): Landmark[] => {
   const shoulderWidth = Math.hypot(lS.x - rS.x, lS.y - rS.y, lS.z - rS.z);
   if (shoulderWidth < 0.01) return landmarks;
 
-  const w = shoulderWidth;
-  const midX = (lS.x + rS.x) / 2;
-  const midY = (lS.y + rS.y) / 2;
+  const scale = Math.min(
+    MAX_ADAPT_SCALE,
+    Math.max(MIN_ADAPT_SCALE, SEATED_METRIC_SHOULDER_WIDTH / shoulderWidth),
+  );
 
-  // Per-side anchors: interpolate between midline and shoulder so the
-  // synthetic joints stay on the anatomically correct side.
-  const side = (shoulder: Landmark, lateral: number, drop: number, forward: number): Landmark => ({
-    x: midX + (shoulder.x - midX) * lateral,
-    y: midY + drop * w,
-    z: shoulder.z - forward * w,
-    visibility: SYNTHETIC_VISIBILITY,
-  });
+  // Anchor: the synthetic hip center in INPUT space — shoulder midpoint
+  // dropped by the torso length (image y is down-positive, as is the output
+  // space, so +drop moves down in both).
+  const anchorX = (lS.x + rS.x) / 2;
+  const anchorY = (lS.y + rS.y) / 2 + HIP_DROP * shoulderWidth;
+  const anchorZ = (lS.z + rS.z) / 2;
 
   const out = landmarks.slice();
-  const set = (leftIdx: number, rightIdx: number, lateral: number, drop: number, forward: number) => {
-    out[leftIdx] = side(lS, lateral, drop, forward);
-    out[rightIdx] = side(rS, lateral, drop, forward);
+  for (let i = 0; i < landmarks.length; i++) {
+    if (LOWER_BODY_INDICES.includes(i)) continue;
+    const p = landmarks[i];
+    out[i] = {
+      x: (p.x - anchorX) * scale,
+      y: (p.y - anchorY) * scale,
+      z: (p.z - anchorZ) * scale,
+      visibility: p.visibility,
+    };
+  }
+
+  // Synthetic standing legs, built directly in the hip-anchored metric
+  // output space. x follows the live (transformed) shoulders so the stance
+  // tracks lateral sway; y/z are fixed anatomical constants.
+  const lSx = out[POSE_INDEX.LEFT_SHOULDER].x;
+  const rSx = out[POSE_INDEX.RIGHT_SHOULDER].x;
+  const set = (leftIdx: number, rightIdx: number, lateral: number, y: number, z: number) => {
+    out[leftIdx] = { x: lSx * lateral, y, z, visibility: SYNTHETIC_VISIBILITY };
+    out[rightIdx] = { x: rSx * lateral, y, z, visibility: SYNTHETIC_VISIBILITY };
   };
 
-  set(POSE_INDEX.LEFT_HIP, POSE_INDEX.RIGHT_HIP, HIP_NARROWING, HIP_DROP, 0);
-  set(POSE_INDEX.LEFT_KNEE, POSE_INDEX.RIGHT_KNEE, 0.9, KNEE_DROP, KNEE_FORWARD);
-  set(POSE_INDEX.LEFT_ANKLE, POSE_INDEX.RIGHT_ANKLE, 0.9, ANKLE_DROP, ANKLE_FORWARD);
-  set(POSE_INDEX.LEFT_HEEL, POSE_INDEX.RIGHT_HEEL, 0.9, ANKLE_DROP + 0.08, ANKLE_FORWARD + 0.1);
-  set(POSE_INDEX.LEFT_FOOT_INDEX, POSE_INDEX.RIGHT_FOOT_INDEX, 0.9, ANKLE_DROP + 0.1, ANKLE_FORWARD - 0.35);
+  set(POSE_INDEX.LEFT_HIP, POSE_INDEX.RIGHT_HIP, HIP_NARROWING, 0, 0);
+  set(POSE_INDEX.LEFT_KNEE, POSE_INDEX.RIGHT_KNEE, STANCE_WIDENING, (KNEE_DROP - HIP_DROP) * SEATED_METRIC_SHOULDER_WIDTH, KNEE_FORWARD * SEATED_METRIC_SHOULDER_WIDTH);
+  set(POSE_INDEX.LEFT_ANKLE, POSE_INDEX.RIGHT_ANKLE, STANCE_WIDENING, SEATED_METRIC_ANKLE_DEPTH, 0);
+  set(POSE_INDEX.LEFT_HEEL, POSE_INDEX.RIGHT_HEEL, STANCE_WIDENING, (HEEL_DROP - HIP_DROP) * SEATED_METRIC_SHOULDER_WIDTH, -HEEL_BACK * SEATED_METRIC_SHOULDER_WIDTH);
+  set(POSE_INDEX.LEFT_FOOT_INDEX, POSE_INDEX.RIGHT_FOOT_INDEX, STANCE_WIDENING, (FOOT_DROP - HIP_DROP) * SEATED_METRIC_SHOULDER_WIDTH, FOOT_FORWARD * SEATED_METRIC_SHOULDER_WIDTH);
 
   return out;
 };

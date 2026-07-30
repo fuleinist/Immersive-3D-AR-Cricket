@@ -16,6 +16,20 @@ export interface PoseResults {
   poseWorldLandmarks: Landmark[];
 }
 
+/**
+ * Coordinate space of a landmark frame handed to the renderer.
+ * 'world' = hip-anchored meters (MediaPipe poseWorldLandmarks convention —
+ * also what the seated adaptation emits); 'image' = normalized frame
+ * coordinates (legacy fallback only, when world landmarks are unavailable).
+ */
+export type LandmarkSpace = 'world' | 'image';
+
+/** One frame of pose landmarks plus the space the renderer must map them from. */
+export interface PoseLandmarkFrame {
+  landmarks: Landmark[];
+  space: LandmarkSpace;
+}
+
 export enum GameState {
   MENU = 'MENU',
   BATTING = 'BATTING',
