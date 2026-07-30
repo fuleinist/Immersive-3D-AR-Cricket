@@ -36,7 +36,7 @@ const DEFAULT_DT = 1 / 30;
 const MIN_DT = 1 / 240;
 const MAX_DT = 0.5;
 
-const alpha = (cutoffHz: number, dtSeconds: number): number => {
+export const alpha = (cutoffHz: number, dtSeconds: number): number => {
   const tau = 1 / (2 * Math.PI * cutoffHz);
   return 1 / (1 + tau / dtSeconds);
 };
@@ -93,31 +93,73 @@ export class OneEuroFilter {
 /**
  * Tuned for MediaPipe NORMALIZED image landmarks (poseLandmarks: x/y in
  * ~[0,1] frame units, z in image-width units) at 30 fps:
- *  - minCutoff 1.0 Hz: at rest alpha ~= 0.17, which rejects ~90% of
- *    white-noise variance — this is what kills the idle avatar shake.
+ *  - minCutoff 0.6 Hz: at rest alpha ~= 0.11, rejecting ~93% of white-noise
+ *    variance — this is what kills the idle avatar shake. Lowering minCutoff
+ *    only affects the near-still regime: the moment the signal moves, beta
+ *    takes over and opens the filter up.
  *  - beta 3.0: a batting-swing wrist moves ~1.5 frame-widths/s, pushing the
  *    cutoff to ~5 Hz (alpha ~= 0.5) so the filter tracks a 10-frame swing
  *    with ~1 frame of lag (measured in scripts/verify-pose-smoothing.mjs).
- *  - deadband 0.0008 ~= half a pixel on a 640 px-wide frame: freezes the
+ *  - deadband 0.001 ~= 2/3 pixel on a 640 px-wide frame: freezes the
  *    residual sub-pixel shimmer that the 1€ core can't remove without lag.
  */
 export const IMAGE_SPACE_SMOOTHING: OneEuroParams = {
-  minCutoff: 1.0,
+  minCutoff: 0.6,
   beta: 3.0,
   dCutoff: 1.0,
-  deadband: 0.0008,
+  deadband: 0.001,
 };
 
 /**
- * Same profile for WORLD landmarks (poseWorldLandmarks, hip-anchored
+ * Stronger profile for the arm chain (shoulders 11/12, elbows 13/14,
+ * wrists 15/16) in image space. These joints drive the bat and read every
+ * residual tremor, so they get a lower still-cutoff and a wider deadband;
+ * beta is raised so a real swing still snaps the filter open.
+ */
+export const IMAGE_SPACE_ARM_SMOOTHING: OneEuroParams = {
+  minCutoff: 0.45,
+  beta: 3.5,
+  dCutoff: 1.0,
+  deadband: 0.0012,
+};
+
+/**
+ * Same profiles for WORLD landmarks (poseWorldLandmarks, hip-anchored
  * meters). Speeds are numerically similar (fast swing ~= 2-4 m/s) so the
- * same cutoff/beta apply; deadband is 2 mm.
+ * same cutoff/beta apply; deadbands are in millimeters.
  */
 export const WORLD_SPACE_SMOOTHING: OneEuroParams = {
-  minCutoff: 1.0,
+  minCutoff: 0.5,
   beta: 3.0,
   dCutoff: 1.0,
-  deadband: 0.002,
+  deadband: 0.003,
+};
+
+export const WORLD_SPACE_ARM_SMOOTHING: OneEuroParams = {
+  minCutoff: 0.45,
+  beta: 3.5,
+  dCutoff: 1.0,
+  deadband: 0.0035,
+};
+
+/** BlazePose indices for shoulders/elbows/wrists — the bat-driving chain. */
+export const UPPER_BODY_LANDMARKS: readonly number[] = [11, 12, 13, 14, 15, 16];
+
+/**
+ * Build a per-landmark params table for LandmarkSmoother: `overrideParams`
+ * on the given indices, `baseParams` everywhere else.
+ */
+export const buildLandmarkOverrides = (
+  landmarkCount: number,
+  indices: readonly number[],
+  overrideParams: OneEuroParams,
+  baseParams: OneEuroParams,
+): OneEuroParams[] => {
+  const table = new Array<OneEuroParams>(landmarkCount).fill(baseParams);
+  for (const i of indices) {
+    if (i >= 0 && i < landmarkCount) table[i] = overrideParams;
+  }
+  return table;
 };
 
 /**
@@ -125,17 +167,21 @@ export const WORLD_SPACE_SMOOTHING: OneEuroParams = {
  * landmark per coordinate (33 x 3 channels), preallocated once at
  * construction. `filter()` mutates x/y/z in place — visibility is left
  * untouched so tracking-mode detection thresholds behave identically.
+ *
+ * `perLandmarkParams` optionally assigns a different filter profile to
+ * individual landmarks (e.g. a stronger one for the bat-driving arm chain);
+ * entries default to `params`.
  */
 export class LandmarkSmoother {
   private readonly channels: OneEuroFilter[];
   private readonly landmarkCount: number;
   private lastTimestamp = -1;
 
-  constructor(params: OneEuroParams, landmarkCount = 33) {
+  constructor(params: OneEuroParams, landmarkCount = 33, perLandmarkParams?: readonly OneEuroParams[]) {
     this.landmarkCount = landmarkCount;
     this.channels = new Array(landmarkCount * 3);
     for (let i = 0; i < this.channels.length; i++) {
-      this.channels[i] = new OneEuroFilter(params);
+      this.channels[i] = new OneEuroFilter(perLandmarkParams?.[Math.floor(i / 3)] ?? params);
     }
   }
 
