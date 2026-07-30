@@ -46,3 +46,34 @@ export const generateCommentary = async (
     return null;
   }
 };
+
+/**
+ * Optional AI enrichment for the coaching overlay: rewrites the deterministic
+ * scripted tips into one coach's note. Same lazy-import pattern as above —
+ * with no key configured this returns null and nothing changes on screen.
+ */
+export const generateCoachingInsight = async (
+  deliveryName: string,
+  result: ShotResult,
+  scriptedTips: readonly string[],
+): Promise<string | null> => {
+  const apiKey = (typeof process !== 'undefined' && process.env?.API_KEY) || '';
+  if (!apiKey) return null;
+
+  try {
+    const { GoogleGenAI } = await import('@google/genai');
+    const ai = new GoogleGenAI({ apiKey });
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: `You are an elite cricket batting coach. A player in an AR cricket game just faced the famous "${deliveryName}" delivery.
+Outcome: ${result}.
+Scripted coaching notes:
+${scriptedTips.map((tip) => `- ${tip}`).join('\n')}
+Rewrite these into ONE short, encouraging coaching note (max 2 sentences, plain text, no preamble).`,
+    });
+    return response.text?.trim() || null;
+  } catch (error) {
+    console.error("Gemini API Error:", error);
+    return null;
+  }
+};

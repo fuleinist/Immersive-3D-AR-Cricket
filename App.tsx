@@ -2,9 +2,11 @@ import React, { useState, useRef, useCallback } from 'react';
 import { WebcamPose } from './components/WebcamPose';
 import { Scene } from './components/Scene';
 import { ResultCard } from './components/ResultCard';
-import { GameState, GameMode, Landmark, PoseResults, ShotResult, GameStats, Stance, BallRecord } from './types';
+import { CommentaryOverlay } from './components/CommentaryOverlay';
+import { GameState, GameMode, Landmark, PoseResults, ShotResult, GameStats, Stance, BallRecord, AiCoachingNote } from './types';
 import { FAMOUS_DELIVERIES } from './data/famousDeliveries';
-import { generateCommentary } from './services/geminiService';
+import { getCoachingTips } from './data/coaching';
+import { generateCommentary, generateCoachingInsight } from './services/geminiService';
 
 // Scripted local commentary — the default experience (Gemini is optional)
 const LOCAL_COMMENTARY: Record<ShotResult, string[]> = {
@@ -40,6 +42,7 @@ const App: React.FC = () => {
   const [gameMode, setGameMode] = useState<GameMode>(GameMode.EASY);
   const [deliveryIndex, setDeliveryIndex] = useState(0);
   const [history, setHistory] = useState<BallRecord[]>([]);
+  const [aiCoaching, setAiCoaching] = useState<AiCoachingNote | null>(null);
   
   // Calibration State
   const [avatarSize, setAvatarSize] = useState<number>(0.8);
@@ -66,6 +69,7 @@ const App: React.FC = () => {
     setGameState(GameState.BATTING);
     setDeliveryIndex(0);
     setHistory([]);
+    setAiCoaching(null);
     setStats({
         score: 0,
         ballsFaced: 0,
@@ -76,12 +80,12 @@ const App: React.FC = () => {
     setResetTrigger(prev => prev + 1);
   }, []);
 
-  const handleBallOutcome = async (result: ShotResult, speed: number, distance: number) => {
+  const handleBallOutcome = async (result: ShotResult, speed: number, distance: number, contactZ?: number) => {
     const delivery = FAMOUS_DELIVERIES[deliveryIndex];
     const runs = result === ShotResult.SIX ? 6 : result === ShotResult.FOUR ? 4 : 0;
     const isLastDelivery = deliveryIndex >= FAMOUS_DELIVERIES.length - 1;
 
-    setHistory(prev => [...prev, { delivery, result, runs, speed, distance }]);
+    setHistory(prev => [...prev, { delivery, result, runs, speed, distance, contactZ }]);
 
     const scripted = LOCAL_COMMENTARY[result][deliveryIndex % LOCAL_COMMENTARY[result].length];
     setStats(prev => ({
@@ -101,6 +105,13 @@ const App: React.FC = () => {
         if (aiComment) setStats(prev => ({ ...prev, commentary: aiComment }));
       })
       .catch(() => { /* AI commentary is best-effort only */ });
+
+    // Optional AI enrichment of the scripted coaching tips (same no-key no-op)
+    generateCoachingInsight(delivery.name, result, getCoachingTips({ delivery, result, speed, distance, contactZ }))
+      .then(note => {
+        if (note) setAiCoaching({ deliveryId: delivery.id, text: note });
+      })
+      .catch(() => { /* AI coaching is best-effort only */ });
 
     if (isLastDelivery) {
         setTimeout(() => setGameState(GameState.FINISHED), 1500);
@@ -271,6 +282,14 @@ const App: React.FC = () => {
                 </p>
             </div>
         </div>
+
+        {/* Commentary overlay (educational / coaching / off) — self-hides when not batting */}
+        <CommentaryOverlay
+            gameState={gameState}
+            delivery={currentDelivery}
+            lastBall={history.length > 0 ? history[history.length - 1] : null}
+            aiCoaching={aiCoaching}
+        />
       </div>
     </div>
   );
