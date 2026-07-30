@@ -116,18 +116,22 @@ export interface ModeDetection {
 /**
  * Reduce one frame of normalized image landmarks to lower-body trackability
  * signals. Returns null when the frame carries no usable landmark data.
+ *
+ * Called once per pose frame (~30/s). Hot callers may pass `out` to write
+ * into a recycled sample object (same returned value semantics); without
+ * `out` a fresh object is allocated.
  */
-export const sampleFrame = (landmarks: Landmark[] | null | undefined): FrameSample | null => {
+export const sampleFrame = (landmarks: Landmark[] | null | undefined, out?: FrameSample): FrameSample | null => {
   if (!landmarks || landmarks.length < 33) return null;
   const vis = (i: number) => landmarks[i]?.visibility ?? 0;
   const lHip = landmarks[POSE_INDEX.LEFT_HIP];
   const rHip = landmarks[POSE_INDEX.RIGHT_HIP];
-  return {
-    hipVisibility: Math.min(vis(POSE_INDEX.LEFT_HIP), vis(POSE_INDEX.RIGHT_HIP)),
-    hipsInFrame: lHip.y < HIP_IN_FRAME_MAX_Y && rHip.y < HIP_IN_FRAME_MAX_Y,
-    kneeVisibility: Math.max(vis(POSE_INDEX.LEFT_KNEE), vis(POSE_INDEX.RIGHT_KNEE)),
-    ankleVisibility: Math.max(vis(POSE_INDEX.LEFT_ANKLE), vis(POSE_INDEX.RIGHT_ANKLE)),
-  };
+  const sample: FrameSample = out ?? { hipVisibility: 0, hipsInFrame: false, kneeVisibility: 0, ankleVisibility: 0 };
+  sample.hipVisibility = Math.min(vis(POSE_INDEX.LEFT_HIP), vis(POSE_INDEX.RIGHT_HIP));
+  sample.hipsInFrame = lHip.y < HIP_IN_FRAME_MAX_Y && rHip.y < HIP_IN_FRAME_MAX_Y;
+  sample.kneeVisibility = Math.max(vis(POSE_INDEX.LEFT_KNEE), vis(POSE_INDEX.RIGHT_KNEE));
+  sample.ankleVisibility = Math.max(vis(POSE_INDEX.LEFT_ANKLE), vis(POSE_INDEX.RIGHT_ANKLE));
+  return sample;
 };
 
 /**
@@ -230,8 +234,13 @@ export const detectTrackingMode = (samples: FrameSample[]): ModeDetection => {
  * themselves are untracked, the input is returned unchanged — fabricating a
  * body around garbage would look worse than the existing default-pose
  * fallback.
+ *
+ * Runs once per pose frame (~30/s) in sit mode. The default (no `out`)
+ * allocates a fresh array of fresh landmark objects — the harness-facing
+ * behavior. Hot callers pass `out` (33 preallocated landmark objects) to
+ * mutate in place instead: identical values, zero per-frame allocation.
  */
-export const adaptSeatedLandmarks = (landmarks: Landmark[]): Landmark[] => {
+export const adaptSeatedLandmarks = (landmarks: Landmark[], out?: Landmark[]): Landmark[] => {
   if (!landmarks || landmarks.length < 33) return landmarks;
 
   const lS = landmarks[POSE_INDEX.LEFT_SHOULDER];
@@ -254,26 +263,41 @@ export const adaptSeatedLandmarks = (landmarks: Landmark[]): Landmark[] => {
   const anchorY = (lS.y + rS.y) / 2 + HIP_DROP * shoulderWidth;
   const anchorZ = (lS.z + rS.z) / 2;
 
-  const out = landmarks.slice();
+  const target = out ?? landmarks.slice();
   for (let i = 0; i < landmarks.length; i++) {
     if (LOWER_BODY_INDICES.includes(i)) continue;
     const p = landmarks[i];
-    out[i] = {
-      x: (p.x - anchorX) * scale,
-      y: (p.y - anchorY) * scale,
-      z: (p.z - anchorZ) * scale,
-      visibility: p.visibility,
-    };
+    const x = (p.x - anchorX) * scale;
+    const y = (p.y - anchorY) * scale;
+    const z = (p.z - anchorZ) * scale;
+    if (out) {
+      const t = target[i];
+      t.x = x; t.y = y; t.z = z;
+      t.visibility = p.visibility;
+    } else {
+      target[i] = { x, y, z, visibility: p.visibility };
+    }
   }
 
   // Synthetic standing legs, built directly in the hip-anchored metric
   // output space. x follows the live (transformed) shoulders so the stance
   // tracks lateral sway; y/z are fixed anatomical constants.
-  const lSx = out[POSE_INDEX.LEFT_SHOULDER].x;
-  const rSx = out[POSE_INDEX.RIGHT_SHOULDER].x;
+  const lSx = target[POSE_INDEX.LEFT_SHOULDER].x;
+  const rSx = target[POSE_INDEX.RIGHT_SHOULDER].x;
   const set = (leftIdx: number, rightIdx: number, lateral: number, y: number, z: number) => {
-    out[leftIdx] = { x: lSx * lateral, y, z, visibility: SYNTHETIC_VISIBILITY };
-    out[rightIdx] = { x: rSx * lateral, y, z, visibility: SYNTHETIC_VISIBILITY };
+    const lx = lSx * lateral;
+    const rx = rSx * lateral;
+    if (out) {
+      const tl = target[leftIdx];
+      tl.x = lx; tl.y = y; tl.z = z;
+      tl.visibility = SYNTHETIC_VISIBILITY;
+      const tr = target[rightIdx];
+      tr.x = rx; tr.y = y; tr.z = z;
+      tr.visibility = SYNTHETIC_VISIBILITY;
+    } else {
+      target[leftIdx] = { x: lx, y, z, visibility: SYNTHETIC_VISIBILITY };
+      target[rightIdx] = { x: rx, y, z, visibility: SYNTHETIC_VISIBILITY };
+    }
   };
 
   set(POSE_INDEX.LEFT_HIP, POSE_INDEX.RIGHT_HIP, HIP_NARROWING, 0, 0);
@@ -282,7 +306,7 @@ export const adaptSeatedLandmarks = (landmarks: Landmark[]): Landmark[] => {
   set(POSE_INDEX.LEFT_HEEL, POSE_INDEX.RIGHT_HEEL, STANCE_WIDENING, (HEEL_DROP - HIP_DROP) * SEATED_METRIC_SHOULDER_WIDTH, -HEEL_BACK * SEATED_METRIC_SHOULDER_WIDTH);
   set(POSE_INDEX.LEFT_FOOT_INDEX, POSE_INDEX.RIGHT_FOOT_INDEX, STANCE_WIDENING, (FOOT_DROP - HIP_DROP) * SEATED_METRIC_SHOULDER_WIDTH, FOOT_FORWARD * SEATED_METRIC_SHOULDER_WIDTH);
 
-  return out;
+  return target;
 };
 
 /** Indices that adaptSeatedLandmarks replaces — exported for tests/tooling. */
