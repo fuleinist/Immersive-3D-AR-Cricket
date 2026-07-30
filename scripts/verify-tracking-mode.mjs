@@ -34,6 +34,8 @@ const {
   detectTrackingMode,
   adaptSeatedLandmarks,
   MODE_WINDOW_FRAMES,
+  SEATED_METRIC_SHOULDER_WIDTH,
+  SEATED_METRIC_ANKLE_DEPTH,
 } = await import(outfile);
 
 const lm = (x, y, z, visibility) => ({ x, y, z, visibility });
@@ -121,13 +123,31 @@ report('classifyFrame: one good knee is enough for standing', () => {
   assert.equal(classifyFrame(s), 'standing');
 });
 
-console.log('\n--- seated adaptation ---');
+console.log('\n--- seated adaptation (hip-anchored metric standing pose) ---');
 const input = makeLandmarks({ hipVis: 0.1, hipY: 1.2, kneeVis: 0, ankleVis: 0 });
 const adapted = adaptSeatedLandmarks(input);
-report('upper-body landmarks keep original references', () => {
+
+// Expected similitude for the input above: shoulders (0.4,0.3,0)/(0.6,0.3,0)
+// -> w = 0.2, scale = 0.42/0.2 = 2.1, anchor = (0.5, 0.3 + 1.4*0.2, 0).
+const W = 0.2, SCALE = SEATED_METRIC_SHOULDER_WIDTH / W;
+const ANCHOR = { x: 0.5, y: 0.3 + 1.4 * W, z: 0 };
+report('upper body re-expressed by the shoulder-anchored similitude', () => {
   for (const i of [0, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]) {
-    assert.equal(adapted[i], input[i], `index ${i} reference changed`);
+    const p = input[i];
+    const expected = {
+      x: (p.x - ANCHOR.x) * SCALE,
+      y: (p.y - ANCHOR.y) * SCALE,
+      z: (p.z - ANCHOR.z) * SCALE,
+    };
+    assert.ok(Math.abs(adapted[i].x - expected.x) < 1e-9, `index ${i} x: ${adapted[i].x} != ${expected.x}`);
+    assert.ok(Math.abs(adapted[i].y - expected.y) < 1e-9, `index ${i} y: ${adapted[i].y} != ${expected.y}`);
+    assert.ok(Math.abs(adapted[i].z - expected.z) < 1e-9, `index ${i} z: ${adapted[i].z} != ${expected.z}`);
+    assert.equal(adapted[i].visibility, p.visibility, `index ${i} visibility changed`);
   }
+});
+report('shoulder span is rescaled to the anatomical metric constant', () => {
+  const span = Math.hypot(adapted[11].x - adapted[12].x, adapted[11].y - adapted[12].y, adapted[11].z - adapted[12].z);
+  assert.ok(Math.abs(span - SEATED_METRIC_SHOULDER_WIDTH) < 1e-9, `span ${span}`);
 });
 report('lower body replaced with visible synthetic joints', () => {
   for (const i of [23, 24, 25, 26, 27, 28, 29, 30, 31, 32]) {
@@ -135,18 +155,36 @@ report('lower body replaced with visible synthetic joints', () => {
     assert.equal(adapted[i].visibility, 0.9);
   }
 });
-report('synthetic hips sit below shoulders, knees ahead of hips, ankles below knees', () => {
-  const midShoulderY = (input[11].y + input[12].y) / 2;
-  assert.ok(adapted[23].y > midShoulderY, 'hips not below shoulders');
-  assert.ok(adapted[25].z < adapted[23].z, 'knees not toward camera');
-  assert.ok(adapted[27].y > adapted[25].y, 'ankles not below knees');
+report('synthetic hips pinned at the root, knees ahead, ankles below at standing depth', () => {
+  assert.ok(Math.abs(adapted[23].y) < 1e-12 && Math.abs(adapted[24].y) < 1e-12, 'hips not at root plane');
+  assert.ok(adapted[25].y > 0 && adapted[25].y < adapted[27].y, 'knees not between hips and ankles');
+  assert.ok(Math.abs(adapted[27].y - SEATED_METRIC_ANKLE_DEPTH) < 1e-9, `ankle depth ${adapted[27].y}`);
+  assert.ok(Math.abs(SEATED_METRIC_ANKLE_DEPTH - 0.95) < 0.02, `ankle depth ${SEATED_METRIC_ANKLE_DEPTH} != standing 0.95`);
+  assert.ok(adapted[25].z > adapted[23].z, 'knees not toward viewer');
+  assert.ok(Math.abs(adapted[27].x) > Math.abs(adapted[23].x), 'stance not wider than hips');
 });
-report('synthetic lower body is anchored to live shoulders', () => {
+report('root stays pinned when the player sways (feet on the ground plane)', () => {
   const shifted = makeLandmarks({ hipVis: 0.1, hipY: 1.2, kneeVis: 0, ankleVis: 0 });
   shifted[11] = { ...shifted[11], x: shifted[11].x + 0.1 };
   shifted[12] = { ...shifted[12], x: shifted[12].x + 0.1 };
   const adaptedShifted = adaptSeatedLandmarks(shifted);
-  assert.ok(Math.abs(adaptedShifted[23].x - (adapted[23].x + 0.1)) < 1e-9, 'hip x did not follow shoulder shift');
+  for (const i of [23, 24, 27, 28]) {
+    assert.ok(Math.abs(adaptedShifted[i].y - adapted[i].y) < 1e-9, `index ${i} y moved with sway`);
+  }
+});
+report('bat-relevant directions are invariant under the similitude', () => {
+  const dir = (lms) => {
+    const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 });
+    const sub = (a, b) => ({ x: a.x - b.x, y: a.y - b.y, z: a.z - b.z });
+    const norm = (v) => { const n = Math.hypot(v.x, v.y, v.z); return { x: v.x / n, y: v.y / n, z: v.z / n }; };
+    const cross = (a, b) => ({ x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x });
+    const wristDiff = norm(sub(lms[15], lms[16]));
+    const forearm = norm(sub(mid(lms[15], lms[16]), mid(lms[11], lms[12])));
+    return norm(cross(wristDiff, forearm));
+  };
+  const a = dir(input), b = dir(adapted);
+  const dot = a.x * b.x + a.y * b.y + a.z * b.z;
+  assert.ok(Math.abs(1 - dot) < 1e-9, `bat-forward direction drifted (dot ${dot})`);
 });
 report('untracked shoulders -> input returned unchanged', () => {
   const weak = makeLandmarks({ upperVis: 0.2 });

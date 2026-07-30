@@ -3,11 +3,28 @@ import { WebcamPose } from './components/WebcamPose';
 import { Scene } from './components/Scene';
 import { ResultCard } from './components/ResultCard';
 import { CommentaryOverlay } from './components/CommentaryOverlay';
-import { GameState, GameMode, Landmark, PoseResults, ShotResult, GameStats, Stance, BallRecord, AiCoachingNote, TrackingMode, ResolvedTrackingMode } from './types';
+import { GameState, GameMode, PoseLandmarkFrame, PoseResults, ShotResult, GameStats, Stance, BallRecord, AiCoachingNote, TrackingMode, ResolvedTrackingMode } from './types';
 import { FAMOUS_DELIVERIES } from './data/famousDeliveries';
 import { getCoachingTips } from './data/coaching';
 import { generateCommentary, generateCoachingInsight } from './services/geminiService';
+import { startAmbient, stopAmbient } from './services/ambientAudio';
 import { sampleFrame, detectTrackingMode, adaptSeatedLandmarks, MODE_WINDOW_FRAMES, FrameSample } from './services/trackingMode';
+import { LateralRootTracker } from './services/lateralTracking';
+import {
+  LandmarkSmoother,
+  IMAGE_SPACE_SMOOTHING,
+  IMAGE_SPACE_ARM_SMOOTHING,
+  WORLD_SPACE_SMOOTHING,
+  WORLD_SPACE_ARM_SMOOTHING,
+  UPPER_BODY_LANDMARKS,
+  buildLandmarkOverrides,
+} from './services/poseSmoothing';
+
+// Per-landmark filter profiles: the bat-driving arm chain (shoulders,
+// elbows, wrists) gets the stronger variant; everything else uses the base
+// profile. Built once — LandmarkSmoother reads the table at construction.
+const IMAGE_OVERRIDES = buildLandmarkOverrides(33, UPPER_BODY_LANDMARKS, IMAGE_SPACE_ARM_SMOOTHING, IMAGE_SPACE_SMOOTHING);
+const WORLD_OVERRIDES = buildLandmarkOverrides(33, UPPER_BODY_LANDMARKS, WORLD_SPACE_ARM_SMOOTHING, WORLD_SPACE_SMOOTHING);
 
 // Scripted local commentary — the default experience (Gemini is optional)
 const LOCAL_COMMENTARY: Record<ShotResult, string[]> = {
@@ -65,7 +82,27 @@ const App: React.FC = () => {
 
   const [resetTrigger, setResetTrigger] = useState(0);
 
-  const poseLandmarksRef = useRef< Landmark[] | null>(null);
+  const poseLandmarksRef = useRef<PoseLandmarkFrame | null>(null);
+
+  // Reusable frame payloads — the renderer's ref is swapped per pose frame,
+  // so the wrapper objects are preallocated to avoid per-frame churn.
+  const framesRef = useRef<{ world: PoseLandmarkFrame; image: PoseLandmarkFrame }>({
+    world: { landmarks: [], space: 'world' },
+    image: { landmarks: [], space: 'image' },
+  });
+
+  // One Euro smoothers, one per landmark space. Both streams are filtered
+  // unconditionally so switching tracking modes never hits stale filter
+  // state. Lazily created on the first pose frame (~zero steady-state cost:
+  // 33x3 channels preallocated once, filtering mutates landmarks in place).
+  const smoothersRef = useRef<{ image: LandmarkSmoother; world: LandmarkSmoother } | null>(null);
+
+  // Lateral root tracking: maps the player's mid-shoulder x (relative to a
+  // calibrated center) to a small world-space X offset for the avatar root.
+  // A plain-number ref the Avatar reads per render frame — no re-renders.
+  const lateralTrackerRef = useRef<LateralRootTracker | null>(null);
+  const lateralOffsetRef = useRef(0);
+  const lastPoseClockRef = useRef(-1);
 
   // Ref mirrors so handlePoseUpdate can stay identity-stable — WebcamPose
   // re-initializes the camera whenever the callback identity changes.
@@ -77,7 +114,62 @@ const App: React.FC = () => {
   useEffect(() => { trackingModeRef.current = trackingMode; }, [trackingMode]);
   useEffect(() => { gameStateRef.current = gameState; }, [gameState]);
 
+  // Ambient crowd noise loops only while an innings is live; it starts from
+  // the PLAY BALL gesture (startGame) and stops on innings end / unmount.
+  useEffect(() => {
+    if (gameState !== GameState.BATTING) stopAmbient();
+  }, [gameState]);
+  useEffect(() => () => stopAmbient(), []);
+
+  // Lateral recalibration: stance selection and every resolved mode change
+  // re-center wherever the player currently is (startGame does the same for
+  // a new session). No-ops until the first pose frame creates the tracker.
+  useEffect(() => { lateralTrackerRef.current?.calibrate(); }, [stance]);
+  useEffect(() => {
+    lateralTrackerRef.current?.setMode(activeMode);
+    lateralTrackerRef.current?.calibrate();
+  }, [activeMode]);
+
   const handlePoseUpdate = useCallback((results: PoseResults) => {
+    if (!smoothersRef.current) {
+      smoothersRef.current = {
+        image: new LandmarkSmoother(IMAGE_SPACE_SMOOTHING, 33, IMAGE_OVERRIDES),
+        world: new LandmarkSmoother(WORLD_SPACE_SMOOTHING, 33, WORLD_OVERRIDES),
+      };
+    }
+    const smoothers = smoothersRef.current;
+
+    // Single ingestion point: de-jitter the RAW landmarks (1€ filter, in
+    // place) BEFORE anything consumes them — tracking-mode sampling, seated
+    // adaptation, avatar bones, bat orientation, shot detection. Smoothing
+    // must happen before adaptSeatedLandmarks: the adaptation anchors a
+    // synthetic lower body to the live shoulders, and filtering after the
+    // fact would fight that anchoring.
+    smoothers.image.filter(results.poseLandmarks);
+    smoothers.world.filter(results.poseWorldLandmarks);
+
+    // Pose-stream clock: everything per-pose-frame (lateral tracking now,
+    // swing velocity in the renderer via frame.timeMs) derives dt from this.
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    let dtPose = lastPoseClockRef.current < 0 ? 1 / 30 : (now - lastPoseClockRef.current) / 1000;
+    lastPoseClockRef.current = now;
+    if (dtPose < 1 / 240) dtPose = 1 / 240;
+    else if (dtPose > 0.5) dtPose = 0.5;
+
+    // Lateral root offset from the SMOOTHED image landmarks (the only
+    // stream that carries body translation in both tracking modes — world
+    // landmarks are hip-anchored). Degenerate frames hold the last offset.
+    if (!lateralTrackerRef.current) {
+      lateralTrackerRef.current = new LateralRootTracker();
+      lateralTrackerRef.current.setMode(activeModeRef.current);
+    }
+    const lms = results.poseLandmarks;
+    if (lms && lms.length >= 13) {
+      const midShoulderX = (lms[11].x + lms[12].x) * 0.5;
+      const shoulderVis = Math.min(lms[11].visibility ?? 0, lms[12].visibility ?? 0);
+      lateralOffsetRef.current = lateralTrackerRef.current.update(midShoulderX, shoulderVis, dtPose);
+    }
+
     // Rolling calibration window for seated/standing detection.
     const sample = sampleFrame(results.poseLandmarks);
     if (sample) {
@@ -103,12 +195,26 @@ const App: React.FC = () => {
     if (activeModeRef.current === TrackingMode.SITTING) {
       // Normalized image landmarks: their x/y don't depend on hip estimation,
       // unlike hip-anchored world landmarks which jitter when the player is
-      // seated and the lower body is occluded. Lower body is replaced by a
-      // synthetic seated pose anchored to the live shoulders.
-      poseLandmarksRef.current = adaptSeatedLandmarks(results.poseLandmarks ?? results.poseWorldLandmarks);
+      // seated and the lower body is occluded. The adaptation re-anchors the
+      // pose to synthetic hips, scales it to anatomical meters and swaps in
+      // a synthetic standing lower body — emitting the same hip-anchored
+      // metric space the renderer consumes in standing mode, so the avatar
+      // keeps the same ground plane and framing either way.
+      const frame = framesRef.current.world;
+      frame.landmarks = adaptSeatedLandmarks(results.poseLandmarks ?? results.poseWorldLandmarks);
+      poseLandmarksRef.current = frame;
+    } else if (results.poseWorldLandmarks) {
+      const frame = framesRef.current.world;
+      frame.landmarks = results.poseWorldLandmarks;
+      poseLandmarksRef.current = frame;
     } else {
-      poseLandmarksRef.current = results.poseWorldLandmarks || results.poseLandmarks;
+      const frame = framesRef.current.image;
+      frame.landmarks = results.poseLandmarks;
+      poseLandmarksRef.current = frame;
     }
+    // Stamp the pose clock on the emitted frame so the renderer can tell
+    // genuinely new pose data from re-reads of the same landmarks.
+    if (poseLandmarksRef.current) poseLandmarksRef.current.timeMs = now;
   }, []);
 
   const startGame = useCallback(() => {
@@ -119,6 +225,16 @@ const App: React.FC = () => {
       : trackingModeRef.current;
     activeModeRef.current = resolved;
     setActiveMode(resolved);
+
+    // New session: re-center the lateral tracker on wherever the player is
+    // standing/sitting now, with the range of the resolved mode.
+    if (lateralTrackerRef.current) {
+      lateralTrackerRef.current.setMode(resolved);
+      lateralTrackerRef.current.calibrate();
+    }
+
+    // User gesture: start the looping crowd ambience (autoplay-safe).
+    startAmbient();
 
     setGameState(GameState.BATTING);
     setDeliveryIndex(0);
@@ -184,9 +300,9 @@ const App: React.FC = () => {
       <WebcamPose onPoseUpdate={handlePoseUpdate} showVideo={gameState !== GameState.MENU} />
 
       <div className="absolute top-0 left-0 w-full h-full z-10">
-        <Scene 
-            poseLandmarks={poseLandmarksRef} 
-            gameState={gameState} 
+        <Scene
+            poseLandmarks={poseLandmarksRef}
+            gameState={gameState}
             stance={stance}
             gameMode={gameMode}
             delivery={currentDelivery}
@@ -194,6 +310,8 @@ const App: React.FC = () => {
             resetTrigger={resetTrigger}
             avatarSize={avatarSize}
             avatarOffset={{ x: avatarOffsetX, y: avatarOffsetY }}
+            lateralOffset={lateralOffsetRef}
+            trackingMode={activeMode}
         />
       </div>
 
@@ -248,10 +366,18 @@ const App: React.FC = () => {
           {gameState === GameState.FINISHED && (
               <ResultCard history={history} onPlayAgain={startGame} />
           )}
+
+          {/* Play-by-play commentary — top of window, below the delivery
+              banner, so it no longer covers the pitch at the bottom. */}
+          <div className="bg-black/60 p-6 rounded-2xl border border-blue-500/30 w-full max-w-2xl backdrop-blur-md shadow-2xl min-h-[90px] flex items-center justify-center">
+              <p className="text-xl italic text-center text-blue-100 font-light leading-snug">
+                  "{stats.commentary}"
+              </p>
+          </div>
         </div>
 
         {/* Center Content: Menu with Calibration */}
-        <div className="pointer-events-auto flex flex-col items-center justify-center py-10">
+        <div className="pointer-events-auto flex flex-1 flex-col items-center justify-center py-10">
             {gameState === GameState.MENU && (
                 <div className="bg-black/90 p-8 rounded-3xl border border-yellow-500/50 text-center max-w-lg shadow-2xl backdrop-blur-xl">
                     <h2 className="text-4xl font-extrabold mb-2 text-yellow-500 italic tracking-tighter uppercase">Calibration</h2>
@@ -364,15 +490,6 @@ const App: React.FC = () => {
                     </button>
                 </div>
             )}
-        </div>
-
-        {/* Footer: Commentary */}
-        <div className="w-full flex justify-center pb-8">
-            <div className="bg-black/60 p-6 rounded-2xl border border-blue-500/30 w-full max-w-2xl backdrop-blur-md shadow-2xl min-h-[90px] flex items-center justify-center">
-                <p className="text-xl italic text-center text-blue-100 font-light leading-snug">
-                    "{stats.commentary}"
-                </p>
-            </div>
         </div>
 
         {/* Commentary overlay (educational / coaching / off) — self-hides when not batting */}

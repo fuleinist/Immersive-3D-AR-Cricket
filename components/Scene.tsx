@@ -4,11 +4,11 @@ import { Physics, usePlane, useCylinder } from '@react-three/cannon';
 import { Environment, PerspectiveCamera, ContactShadows } from '@react-three/drei';
 import { Avatar } from './Avatar';
 import { Ball } from './Ball';
-import { Landmark, GameState, GameMode, ShotResult, Stance, DeliveryScript } from '../types';
+import { PoseLandmarkFrame, GameState, GameMode, ShotResult, Stance, DeliveryScript, ResolvedTrackingMode } from '../types';
 import { Vector3, Mesh } from 'three';
 
 interface SceneProps {
-  poseLandmarks: React.MutableRefObject<Landmark[] | null>;
+  poseLandmarks: React.MutableRefObject<PoseLandmarkFrame | null>;
   gameState: GameState;
   stance: Stance;
   gameMode: GameMode;
@@ -17,6 +17,9 @@ interface SceneProps {
   resetTrigger: number;
   avatarSize?: number;
   avatarOffset?: { x: number; y: number };
+  /** Smoothed lateral root offset (world meters), updated per pose frame. */
+  lateralOffset: React.MutableRefObject<number>;
+  trackingMode: ResolvedTrackingMode;
 }
 
 export const Scene: React.FC<SceneProps> = ({
@@ -28,7 +31,9 @@ export const Scene: React.FC<SceneProps> = ({
   onBallOutcome,
   resetTrigger,
   avatarSize = 0.8,
-  avatarOffset = { x: 0, y: 0 }
+  avatarOffset = { x: 0, y: 0 },
+  lateralOffset,
+  trackingMode
 }) => {
 
   const handleHit = (vel: Vector3, pos: Vector3) => {
@@ -70,12 +75,14 @@ export const Scene: React.FC<SceneProps> = ({
 
       <Physics gravity={[0, -9.8, 0]}>
         {shouldShowAvatar && (
-           <Avatar 
-             landmarks={poseLandmarks} 
-             stance={stance} 
+           <Avatar
+             landmarks={poseLandmarks}
+             stance={stance}
              gameMode={gameMode}
-             size={avatarSize} 
+             size={avatarSize}
              positionOffset={avatarOffset}
+             lateralOffset={lateralOffset}
+             trackingMode={trackingMode}
            />
         )}
         

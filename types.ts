@@ -16,6 +16,27 @@ export interface PoseResults {
   poseWorldLandmarks: Landmark[];
 }
 
+/**
+ * Coordinate space of a landmark frame handed to the renderer.
+ * 'world' = hip-anchored meters (MediaPipe poseWorldLandmarks convention —
+ * also what the seated adaptation emits); 'image' = normalized frame
+ * coordinates (legacy fallback only, when world landmarks are unavailable).
+ */
+export type LandmarkSpace = 'world' | 'image';
+
+/** One frame of pose landmarks plus the space the renderer must map them from. */
+export interface PoseLandmarkFrame {
+  landmarks: Landmark[];
+  space: LandmarkSpace;
+  /**
+   * performance.now() of the pose callback that produced this frame. The
+   * render loop runs faster than the ~30 Hz pose stream, so consumers use
+   * this to detect genuinely new data (e.g. per-pose-frame velocity
+   * estimates) instead of re-reading identical landmarks every render.
+   */
+  timeMs?: number;
+}
+
 export enum GameState {
   MENU = 'MENU',
   BATTING = 'BATTING',
