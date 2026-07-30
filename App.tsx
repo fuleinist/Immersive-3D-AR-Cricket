@@ -1,12 +1,13 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { WebcamPose } from './components/WebcamPose';
 import { Scene } from './components/Scene';
 import { ResultCard } from './components/ResultCard';
 import { CommentaryOverlay } from './components/CommentaryOverlay';
-import { GameState, GameMode, Landmark, PoseResults, ShotResult, GameStats, Stance, BallRecord, AiCoachingNote } from './types';
+import { GameState, GameMode, Landmark, PoseResults, ShotResult, GameStats, Stance, BallRecord, AiCoachingNote, TrackingMode, ResolvedTrackingMode } from './types';
 import { FAMOUS_DELIVERIES } from './data/famousDeliveries';
 import { getCoachingTips } from './data/coaching';
 import { generateCommentary, generateCoachingInsight } from './services/geminiService';
+import { sampleFrame, detectTrackingMode, adaptSeatedLandmarks, MODE_WINDOW_FRAMES, FrameSample } from './services/trackingMode';
 
 // Scripted local commentary — the default experience (Gemini is optional)
 const LOCAL_COMMENTARY: Record<ShotResult, string[]> = {
@@ -43,7 +44,12 @@ const App: React.FC = () => {
   const [deliveryIndex, setDeliveryIndex] = useState(0);
   const [history, setHistory] = useState<BallRecord[]>([]);
   const [aiCoaching, setAiCoaching] = useState<AiCoachingNote | null>(null);
-  
+
+  // Sit Mode: user preference (AUTO detects seated vs standing) and the
+  // concretely resolved mode that the pose pipeline is currently applying.
+  const [trackingMode, setTrackingMode] = useState<TrackingMode>(TrackingMode.AUTO);
+  const [activeMode, setActiveMode] = useState<ResolvedTrackingMode>(TrackingMode.STANDING);
+
   // Calibration State
   const [avatarSize, setAvatarSize] = useState<number>(0.8);
   const [avatarOffsetX, setAvatarOffsetX] = useState<number>(0);
@@ -56,16 +62,64 @@ const App: React.FC = () => {
     lastShotDistance: 0,
     commentary: "Face 5 of the most famous deliveries in cricket history!",
   });
-  
+
   const [resetTrigger, setResetTrigger] = useState(0);
-  
+
   const poseLandmarksRef = useRef< Landmark[] | null>(null);
 
+  // Ref mirrors so handlePoseUpdate can stay identity-stable — WebcamPose
+  // re-initializes the camera whenever the callback identity changes.
+  const modeSamplesRef = useRef<FrameSample[]>([]);
+  const activeModeRef = useRef<ResolvedTrackingMode>(TrackingMode.STANDING);
+  const trackingModeRef = useRef<TrackingMode>(trackingMode);
+  const gameStateRef = useRef<GameState>(gameState);
+
+  useEffect(() => { trackingModeRef.current = trackingMode; }, [trackingMode]);
+  useEffect(() => { gameStateRef.current = gameState; }, [gameState]);
+
   const handlePoseUpdate = useCallback((results: PoseResults) => {
-    poseLandmarksRef.current = results.poseWorldLandmarks || results.poseLandmarks;
+    // Rolling calibration window for seated/standing detection.
+    const sample = sampleFrame(results.poseLandmarks);
+    if (sample) {
+      modeSamplesRef.current.push(sample);
+      if (modeSamplesRef.current.length > MODE_WINDOW_FRAMES) {
+        modeSamplesRef.current.shift();
+      }
+    }
+
+    // Resolve continuously outside of play so the menu avatar + calibration
+    // sliders already reflect the mode that will be used; frozen mid-innings
+    // so a wild swing can't flip the pipeline between deliveries.
+    if (gameStateRef.current !== GameState.BATTING) {
+      const resolved: ResolvedTrackingMode = trackingModeRef.current === TrackingMode.AUTO
+        ? detectTrackingMode(modeSamplesRef.current).mode
+        : trackingModeRef.current;
+      if (resolved !== activeModeRef.current) {
+        activeModeRef.current = resolved;
+        setActiveMode(resolved);
+      }
+    }
+
+    if (activeModeRef.current === TrackingMode.SITTING) {
+      // Normalized image landmarks: their x/y don't depend on hip estimation,
+      // unlike hip-anchored world landmarks which jitter when the player is
+      // seated and the lower body is occluded. Lower body is replaced by a
+      // synthetic seated pose anchored to the live shoulders.
+      poseLandmarksRef.current = adaptSeatedLandmarks(results.poseLandmarks ?? results.poseWorldLandmarks);
+    } else {
+      poseLandmarksRef.current = results.poseWorldLandmarks || results.poseLandmarks;
+    }
   }, []);
 
   const startGame = useCallback(() => {
+    // Final resolve from the latest calibration window, then frozen for the
+    // innings (gameState -> BATTING stops the continuous re-resolve above).
+    const resolved: ResolvedTrackingMode = trackingModeRef.current === TrackingMode.AUTO
+      ? detectTrackingMode(modeSamplesRef.current).mode
+      : trackingModeRef.current;
+    activeModeRef.current = resolved;
+    setActiveMode(resolved);
+
     setGameState(GameState.BATTING);
     setDeliveryIndex(0);
     setHistory([]);
@@ -156,6 +210,13 @@ const App: React.FC = () => {
                       {history.filter(b => b.result === ShotResult.OUT).length}w · Ball {Math.min(stats.ballsFaced + 1, FAMOUS_DELIVERIES.length)}/{FAMOUS_DELIVERIES.length}
                     </span>
                   </div>
+                  {gameState === GameState.BATTING && (
+                      <div className="mt-2 inline-flex items-center gap-1.5 text-[10px] uppercase tracking-widest text-gray-400">
+                          <span className={`w-1.5 h-1.5 rounded-full ${activeMode === TrackingMode.SITTING ? 'bg-blue-400' : 'bg-green-400'}`} />
+                          {activeMode === TrackingMode.SITTING ? 'Sit Mode' : 'Standing'}
+                          {trackingMode === TrackingMode.AUTO && <span className="text-gray-600">· auto</span>}
+                      </div>
+                  )}
               </div>
               
               {stats.lastShotSpeed > 0 && gameState === GameState.BATTING && (
@@ -244,17 +305,17 @@ const App: React.FC = () => {
                       </div>
                     </div>
 
-                    <div className="mb-8">
+                    <div className="mb-6">
                       <div className="text-xs text-gray-500 uppercase font-bold mb-2 tracking-widest">Select Difficulty</div>
                       <div className="flex gap-2 justify-center">
-                        <button 
+                        <button
                           onClick={() => setGameMode(GameMode.EASY)}
                           className={`flex-1 px-4 py-3 rounded-xl font-bold transition-all border ${gameMode === GameMode.EASY ? 'bg-green-600 text-white border-green-400 shadow-[0_0_20px_rgba(34,197,94,0.3)]' : 'bg-gray-800 text-gray-400 border-transparent'}`}
                         >
                           EASY
                           <div className="text-[10px] font-normal opacity-80">Large Hitbox</div>
                         </button>
-                        <button 
+                        <button
                           onClick={() => setGameMode(GameMode.PRO)}
                           className={`flex-1 px-4 py-3 rounded-xl font-bold transition-all border ${gameMode === GameMode.PRO ? 'bg-red-600 text-white border-red-400 shadow-[0_0_20px_rgba(220,38,38,0.3)]' : 'bg-gray-800 text-gray-400 border-transparent'}`}
                         >
@@ -264,7 +325,38 @@ const App: React.FC = () => {
                       </div>
                     </div>
 
-                    <button 
+                    <div className="mb-8">
+                      <div className="text-xs text-gray-500 uppercase font-bold mb-2 tracking-widest">Body Tracking</div>
+                      <div className="flex gap-2 justify-center">
+                        <button
+                          onClick={() => setTrackingMode(TrackingMode.STANDING)}
+                          className={`flex-1 px-3 py-2 rounded-lg font-bold transition-all text-sm ${trackingMode === TrackingMode.STANDING ? 'bg-green-600 text-white shadow-[0_0_15px_rgba(34,197,94,0.3)]' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
+                        >
+                          Standing
+                        </button>
+                        <button
+                          onClick={() => setTrackingMode(TrackingMode.SITTING)}
+                          className={`flex-1 px-3 py-2 rounded-lg font-bold transition-all text-sm ${trackingMode === TrackingMode.SITTING ? 'bg-blue-600 text-white shadow-[0_0_15px_rgba(59,130,246,0.3)]' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
+                        >
+                          Sitting
+                        </button>
+                        <button
+                          onClick={() => setTrackingMode(TrackingMode.AUTO)}
+                          className={`flex-1 px-3 py-2 rounded-lg font-bold transition-all text-sm ${trackingMode === TrackingMode.AUTO ? 'bg-yellow-500 text-black shadow-[0_0_15px_rgba(234,179,8,0.4)]' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
+                        >
+                          Auto
+                        </button>
+                      </div>
+                      <div className="text-[10px] text-gray-500 mt-2 uppercase tracking-widest">
+                        {trackingMode === TrackingMode.AUTO
+                          ? `Detected: ${activeMode === TrackingMode.SITTING ? 'Sitting — upper-body tracking' : 'Standing — full-body tracking'}`
+                          : trackingMode === TrackingMode.SITTING
+                            ? 'Upper-body tracking · legs follow shoulders'
+                            : 'Full-body tracking'}
+                      </div>
+                    </div>
+
+                    <button
                         onClick={startGame}
                         className="w-full py-5 bg-gradient-to-r from-yellow-600 to-yellow-400 hover:from-yellow-500 hover:to-yellow-300 text-black font-black rounded-2xl text-2xl transition-all transform hover:scale-[1.02] active:scale-95 shadow-2xl"
                     >
