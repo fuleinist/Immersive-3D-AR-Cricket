@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "verify:tracking": "node scripts/verify-tracking-mode.mjs",
     "verify:smoothing": "node scripts/verify-pose-smoothing.mjs",
-    "verify:bat": "node scripts/verify-bat-orientation.mjs"
+    "verify:bat": "node scripts/verify-bat-orientation.mjs",
+    "verify:lateral": "node scripts/verify-lateral-root.mjs"
   },
   "dependencies": {
     "@google/genai": "1.37.0",

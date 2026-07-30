@@ -2,7 +2,7 @@ import React, { useRef, useMemo, useEffect } from 'react';
 import { useFrame } from '@react-three/fiber';
 import { useBox } from '@react-three/cannon';
 import * as THREE from 'three';
-import { Landmark, PoseLandmarkFrame, Stance, GameMode } from '../types';
+import { Landmark, PoseLandmarkFrame, Stance, GameMode, TrackingMode, ResolvedTrackingMode } from '../types';
 import { BatTransformSmoother } from '../services/batSmoothing';
 import { BatTransformSolver, type BatJoints } from '../services/batTransform';
 
@@ -12,7 +12,14 @@ interface AvatarProps {
   gameMode: GameMode;
   size?: number;
   positionOffset?: { x: number; y: number };
+  /** Smoothed lateral root offset (world meters), updated per pose frame. */
+  lateralOffset: React.MutableRefObject<number>;
+  trackingMode: ResolvedTrackingMode;
 }
+
+/** Seated players swing arm-only and slower: lower every swing threshold
+ *  so the blade's down-blend stays reachable from a chair. */
+const SEATED_SWING_THRESHOLD_SCALE = 0.7;
 
 /**
  * Static landmarks for a standard batting stance used during menu calibration.
@@ -46,14 +53,17 @@ const GET_DEFAULT_POSE = (isRight: boolean): Landmark[] => {
   return l;
 };
 
-export const Avatar: React.FC<AvatarProps> = ({ 
-  landmarks, 
-  stance, 
+export const Avatar: React.FC<AvatarProps> = ({
+  landmarks,
+  stance,
   gameMode,
-  size = 0.85, 
-  positionOffset = { x: 0, y: 0 } 
+  size = 0.85,
+  positionOffset = { x: 0, y: 0 },
+  lateralOffset,
+  trackingMode
 }) => {
   const jointsRef = useRef<{ [key: string]: THREE.Mesh | null }>({});
+  const rootRef = useRef<THREE.Group>(null);
   const headRef = useRef<THREE.Mesh>(null);
   const torsoRef = useRef<THREE.Mesh>(null);
   const lUpperArmRef = useRef<THREE.Mesh>(null);
@@ -119,8 +129,21 @@ export const Avatar: React.FC<AvatarProps> = ({
   }), [scratch]);
 
   // Switching stance moves the grip to the other wrist — reset the damper
-  // so the bat snaps to the new side instead of sweeping across the body.
-  useEffect(() => { batSmoother.reset(); }, [stance, batSmoother]);
+  // so the bat snaps to the new side instead of sweeping across the body,
+  // and drop any swing phase built up on the old side.
+  useEffect(() => { batSmoother.reset(); batSolver.resetSwing(); }, [stance, batSmoother, batSolver]);
+
+  // Seated swings are arm-only and slower: scale the swing thresholds and
+  // restart phase detection whenever the tracking mode changes.
+  useEffect(() => {
+    batSolver.thresholdScale = trackingMode === TrackingMode.SITTING ? SEATED_SWING_THRESHOLD_SCALE : 1;
+    batSolver.resetSwing();
+  }, [trackingMode, batSolver]);
+
+  // Pose-stream cadence marker for swing velocity: the landmarks only
+  // change when the pose callback stamps a new timeMs, so velocity must be
+  // estimated on that clock, not the (faster, variable) render clock.
+  const lastPoseTimeRef = useRef(-1);
 
   const poseJoint = (key: string, pos: THREE.Vector3, radius: number) => {
     const mesh = jointsRef.current[key];
@@ -148,6 +171,14 @@ export const Avatar: React.FC<AvatarProps> = ({
     const frame = landmarks.current;
     const hasPose = !!frame && frame.landmarks.length >= 33;
     const l = hasPose ? frame.landmarks : defaultPose;
+
+    // Lateral root tracking: the smoothed per-pose-frame offset slides the
+    // whole avatar group in world X only — y/z stay on the JSX base, so the
+    // feet-planted ground-plane invariant is untouched by construction.
+    if (rootRef.current) {
+      rootRef.current.position.x = lateralBase + positionOffset.x + lateralOffset.current;
+    }
+
     // The pipeline tags every frame with its coordinate space — the avatar
     // never guesses. The default pose is authored in world convention.
     const space = hasPose ? frame.space : 'world';
@@ -212,7 +243,37 @@ export const Avatar: React.FC<AvatarProps> = ({
     // detection reads this same damped transform via the kinematic body
     // below, so swing physics inherits the corrected anchor and the
     // damping. A degenerate frame keeps the last good transform.
-    if (batSolver.solve(batJoints, stance === Stance.RIGHT ? 'right' : 'left', batPos, targetQuat)) {
+    const hand = stance === Stance.RIGHT ? ('right' as const) : ('left' as const);
+
+    // Swing phase detection runs on the POSE clock (frame.timeMs), not the
+    // render clock: the landmarks only change per pose frame, so diffing
+    // per render frame would alias a fast swing into alternating v/0
+    // readings and underestimate proportionally to the display rate.
+    const poseTime = hasPose && typeof frame.timeMs === 'number' ? frame.timeMs : -1;
+    if (poseTime >= 0) {
+      const prevTime = lastPoseTimeRef.current;
+      if (poseTime !== prevTime) {
+        lastPoseTimeRef.current = poseTime;
+        if (prevTime < 0) {
+          // First real pose frame after the menu default pose: prime the
+          // velocity estimate — diffing against the default stance would
+          // read the teleport as a phantom swing.
+          batSolver.resetSwing();
+          batSolver.notePoseFrame(batJoints, hand, 1 / 30);
+        } else {
+          let dtPose = (poseTime - prevTime) / 1000;
+          if (dtPose < 1 / 240) dtPose = 1 / 240;
+          else if (dtPose > 0.5) dtPose = 0.5;
+          batSolver.notePoseFrame(batJoints, hand, dtPose);
+        }
+      }
+    } else if (lastPoseTimeRef.current >= 0) {
+      // Pose stream lost (back on the default pose): no swing phase.
+      lastPoseTimeRef.current = -1;
+      batSolver.resetSwing();
+    }
+
+    if (batSolver.solve(batJoints, hand, batPos, targetQuat)) {
       batSmoother.filter(batPos, targetQuat, delta, dampedPos, dampedQuat);
     }
 
@@ -235,7 +296,7 @@ export const Avatar: React.FC<AvatarProps> = ({
   const jointKeys = ['lShoulder','rShoulder','lElbow','rElbow','lWrist','rWrist','lHip','rHip','lKnee','rKnee','lAnkle','rAnkle','midShoulder','midHip'];
 
   return (
-    <group position={[lateralBase + positionOffset.x, 1.0 * size + positionOffset.y, creaseZ]} rotation={[0, Math.PI, 0]}>
+    <group ref={rootRef} position={[lateralBase + positionOffset.x, 1.0 * size + positionOffset.y, creaseZ]} rotation={[0, Math.PI, 0]}>
       <mesh ref={headRef} castShadow><sphereGeometry args={[0.095 * size, 24, 24]} />{bodyMat}</mesh>
       <mesh ref={torsoRef} castShadow><boxGeometry args={[1, 1, 0.8]} />{bodyMat}</mesh>
       <mesh ref={lUpperArmRef} castShadow><cylinderGeometry args={[1, 1, 1, 12]} />{bodyMat}</mesh>

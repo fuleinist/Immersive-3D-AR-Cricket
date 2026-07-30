@@ -9,6 +9,7 @@ import { getCoachingTips } from './data/coaching';
 import { generateCommentary, generateCoachingInsight } from './services/geminiService';
 import { startAmbient, stopAmbient } from './services/ambientAudio';
 import { sampleFrame, detectTrackingMode, adaptSeatedLandmarks, MODE_WINDOW_FRAMES, FrameSample } from './services/trackingMode';
+import { LateralRootTracker } from './services/lateralTracking';
 import {
   LandmarkSmoother,
   IMAGE_SPACE_SMOOTHING,
@@ -96,6 +97,13 @@ const App: React.FC = () => {
   // 33x3 channels preallocated once, filtering mutates landmarks in place).
   const smoothersRef = useRef<{ image: LandmarkSmoother; world: LandmarkSmoother } | null>(null);
 
+  // Lateral root tracking: maps the player's mid-shoulder x (relative to a
+  // calibrated center) to a small world-space X offset for the avatar root.
+  // A plain-number ref the Avatar reads per render frame — no re-renders.
+  const lateralTrackerRef = useRef<LateralRootTracker | null>(null);
+  const lateralOffsetRef = useRef(0);
+  const lastPoseClockRef = useRef(-1);
+
   // Ref mirrors so handlePoseUpdate can stay identity-stable — WebcamPose
   // re-initializes the camera whenever the callback identity changes.
   const modeSamplesRef = useRef<FrameSample[]>([]);
@@ -112,6 +120,15 @@ const App: React.FC = () => {
     if (gameState !== GameState.BATTING) stopAmbient();
   }, [gameState]);
   useEffect(() => () => stopAmbient(), []);
+
+  // Lateral recalibration: stance selection and every resolved mode change
+  // re-center wherever the player currently is (startGame does the same for
+  // a new session). No-ops until the first pose frame creates the tracker.
+  useEffect(() => { lateralTrackerRef.current?.calibrate(); }, [stance]);
+  useEffect(() => {
+    lateralTrackerRef.current?.setMode(activeMode);
+    lateralTrackerRef.current?.calibrate();
+  }, [activeMode]);
 
   const handlePoseUpdate = useCallback((results: PoseResults) => {
     if (!smoothersRef.current) {
@@ -130,6 +147,28 @@ const App: React.FC = () => {
     // fact would fight that anchoring.
     smoothers.image.filter(results.poseLandmarks);
     smoothers.world.filter(results.poseWorldLandmarks);
+
+    // Pose-stream clock: everything per-pose-frame (lateral tracking now,
+    // swing velocity in the renderer via frame.timeMs) derives dt from this.
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    let dtPose = lastPoseClockRef.current < 0 ? 1 / 30 : (now - lastPoseClockRef.current) / 1000;
+    lastPoseClockRef.current = now;
+    if (dtPose < 1 / 240) dtPose = 1 / 240;
+    else if (dtPose > 0.5) dtPose = 0.5;
+
+    // Lateral root offset from the SMOOTHED image landmarks (the only
+    // stream that carries body translation in both tracking modes — world
+    // landmarks are hip-anchored). Degenerate frames hold the last offset.
+    if (!lateralTrackerRef.current) {
+      lateralTrackerRef.current = new LateralRootTracker();
+      lateralTrackerRef.current.setMode(activeModeRef.current);
+    }
+    const lms = results.poseLandmarks;
+    if (lms && lms.length >= 13) {
+      const midShoulderX = (lms[11].x + lms[12].x) * 0.5;
+      const shoulderVis = Math.min(lms[11].visibility ?? 0, lms[12].visibility ?? 0);
+      lateralOffsetRef.current = lateralTrackerRef.current.update(midShoulderX, shoulderVis, dtPose);
+    }
 
     // Rolling calibration window for seated/standing detection.
     const sample = sampleFrame(results.poseLandmarks);
@@ -173,6 +212,9 @@ const App: React.FC = () => {
       frame.landmarks = results.poseLandmarks;
       poseLandmarksRef.current = frame;
     }
+    // Stamp the pose clock on the emitted frame so the renderer can tell
+    // genuinely new pose data from re-reads of the same landmarks.
+    if (poseLandmarksRef.current) poseLandmarksRef.current.timeMs = now;
   }, []);
 
   const startGame = useCallback(() => {
@@ -183,6 +225,13 @@ const App: React.FC = () => {
       : trackingModeRef.current;
     activeModeRef.current = resolved;
     setActiveMode(resolved);
+
+    // New session: re-center the lateral tracker on wherever the player is
+    // standing/sitting now, with the range of the resolved mode.
+    if (lateralTrackerRef.current) {
+      lateralTrackerRef.current.setMode(resolved);
+      lateralTrackerRef.current.calibrate();
+    }
 
     // User gesture: start the looping crowd ambience (autoplay-safe).
     startAmbient();
@@ -251,9 +300,9 @@ const App: React.FC = () => {
       <WebcamPose onPoseUpdate={handlePoseUpdate} showVideo={gameState !== GameState.MENU} />
 
       <div className="absolute top-0 left-0 w-full h-full z-10">
-        <Scene 
-            poseLandmarks={poseLandmarksRef} 
-            gameState={gameState} 
+        <Scene
+            poseLandmarks={poseLandmarksRef}
+            gameState={gameState}
             stance={stance}
             gameMode={gameMode}
             delivery={currentDelivery}
@@ -261,6 +310,8 @@ const App: React.FC = () => {
             resetTrigger={resetTrigger}
             avatarSize={avatarSize}
             avatarOffset={{ x: avatarOffsetX, y: avatarOffsetY }}
+            lateralOffset={lateralOffsetRef}
+            trackingMode={activeMode}
         />
       </div>
 

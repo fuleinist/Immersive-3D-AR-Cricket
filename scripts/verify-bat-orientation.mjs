@@ -18,6 +18,10 @@
  *      joints -> solve() false, outputs untouched
  *   6. pipeline      -> standing world landmarks and seated-adapted
  *      landmarks keep anchor + 90° through the renderer's coordinate map
+ *   7. swing         -> synthetic fast-downward wrist motion blends the
+ *      blade below horizontal (90° + anchor invariants intact); slow
+ *      motion keeps the stance blade; backlift only tilts; seated
+ *      threshold scaling; reset and stall release
  *
  * Run: npm run verify:bat
  */
@@ -311,6 +315,133 @@ report('seated-adapted landmarks: anchor + 90° + plumb blade survive', () => {
     const up = r.batY.dot(bodyUpOf(j));
     assert.ok(up > 0.3, `${hand}: blade not plumb (${up})`);
   }
+});
+
+// ---------------------------------------------------------------------------
+console.log('\n--- swing-aware blade (velocity-driven down blend) ---');
+
+const DT = 1 / 30;
+const lerp = (a, b, t) => a + (b - a) * t;
+
+/**
+ * Right-handed drive sequence on the stance body: grip elbow fixed, the
+ * grip wrist sweeps from `from` to `to` over `frames` pose frames.
+ */
+const swingSeq = (frames, from, to) => {
+  const seq = [];
+  for (let f = 0; f < frames; f++) {
+    const t = frames === 1 ? 1 : f / (frames - 1);
+    const j = stanceJoints();
+    j.rElbow = v(0.24, 0.35, -0.05);
+    j.rWrist = v(lerp(from[0], to[0], t), lerp(from[1], to[1], t), lerp(from[2], to[2], t));
+    seq.push(j);
+  }
+  return seq;
+};
+
+/** Feed a joint sequence at the pose cadence; collect per-frame results. */
+const runSeq = (solver, seq, hand = 'right') => {
+  const out = [];
+  const pos = new THREE.Vector3();
+  const quat = new THREE.Quaternion();
+  for (const j of seq) {
+    solver.notePoseFrame(j, hand, DT);
+    const ok = solver.solve(j, hand, pos, quat);
+    out.push({
+      ok,
+      pos: pos.clone(),
+      batY: new THREE.Vector3(0, 1, 0).applyQuaternion(quat),
+      blend: solver.swingBlend,
+    });
+  }
+  return out;
+};
+
+report('fast downward wrist motion sweeps the blade below horizontal', () => {
+  const s = new BatTransformSolver();
+  const seq = swingSeq(8, [0.18, 0.55, -0.30], [0.16, -0.10, -0.34]); // ~2.8 u/s down
+  const r = runSeq(s, seq);
+  assert.ok(r.every((f) => f.ok), 'solve failed mid-swing');
+  for (let i = 0; i < seq.length; i++) {
+    const fa = new THREE.Vector3().subVectors(seq[i].rWrist, seq[i].rElbow).normalize();
+    assert.ok(Math.abs(r[i].batY.dot(fa)) < PERP_TOL, `frame ${i}: |blade.forearm| ${r[i].batY.dot(fa)}`);
+  }
+  assert.ok(r[0].batY.y > 0, `first frame blade should start up (${r[0].batY.y})`);
+  const last = r[seq.length - 1];
+  assert.ok(last.blend > 0.7, `blend should be high by the downswing (${last.blend})`);
+  assert.ok(last.batY.y < -0.2, `final blade should point down (${last.batY.y})`);
+  assert.ok(last.pos.distanceTo(seq[seq.length - 1].rWrist) < 1e-12, 'anchor drift mid-swing');
+});
+
+report('slow/stance motion keeps the blade up and bit-identical to no-swing', () => {
+  const s = new BatTransformSolver();
+  const seq = swingSeq(90, [0.18, 0.55, -0.30], [0.16, -0.10, -0.34]); // same path over 3s
+  const r = runSeq(s, seq);
+  const last = r[seq.length - 1];
+  assert.equal(last.blend, 0, `blend should stay 0 (${last.blend})`);
+  assert.ok(last.batY.y > 0, `blade should stay up (${last.batY.y})`);
+  const base = solve(seq[seq.length - 1], 'right'); // shared solver: no swing state
+  assert.ok(closeTo(last.batY, base.batY), 'swing-path output drifted from the baseline');
+});
+
+report('fast backlift (pure upward wrist) tilts but never drops the blade', () => {
+  const s = new BatTransformSolver();
+  const seq = swingSeq(8, [0.16, 0.05, -0.30], [0.18, 0.70, -0.28]); // ~2.4 u/s up
+  const r = runSeq(s, seq);
+  const last = r[seq.length - 1];
+  assert.ok(last.blend > 0.1, `speed-only swing should register (${last.blend})`);
+  // SPEED_ONLY_CAP in batTransform.ts: speed without downward component
+  // can only reach 0.5 blend.
+  assert.ok(last.blend <= 0.5 + 1e-9, `backlift blend must stay capped (${last.blend})`);
+  assert.ok(last.batY.y > 0, `blade must not point down on a backlift (${last.batY.y})`);
+});
+
+report('thresholdScale (seated) makes a slower arm-only swing register more', () => {
+  const standing = new BatTransformSolver();
+  const rStand = runSeq(standing, swingSeq(9, [0.18, 0.40, -0.30], [0.16, 0.10, -0.32])); // ~1.1 u/s
+  const seated = new BatTransformSolver();
+  seated.thresholdScale = 0.7;
+  const rSit = runSeq(seated, swingSeq(9, [0.18, 0.40, -0.30], [0.16, 0.10, -0.32]));
+  const bStand = rStand[rStand.length - 1].blend;
+  const bSit = rSit[rSit.length - 1].blend;
+  assert.ok(bSit > bStand + 0.02, `seated blend ${bSit} should clearly exceed standing ${bStand}`);
+});
+
+report('resetSwing returns to the exact stance baseline', () => {
+  const s = new BatTransformSolver();
+  const seq = swingSeq(8, [0.18, 0.55, -0.30], [0.16, -0.10, -0.34]);
+  runSeq(s, seq);
+  s.resetSwing();
+  assert.equal(s.swingBlend, 0);
+  const pos = new THREE.Vector3();
+  const quat = new THREE.Quaternion();
+  assert.ok(s.solve(seq[seq.length - 1], 'right', pos, quat));
+  const batY = new THREE.Vector3(0, 1, 0).applyQuaternion(quat);
+  const base = solve(seq[seq.length - 1], 'right');
+  assert.ok(closeTo(batY, base.batY), 'post-reset output drifted from the baseline');
+});
+
+report('stalled pose stream (unchanged joints) releases the blend to stance', () => {
+  const s = new BatTransformSolver();
+  const seq = swingSeq(8, [0.18, 0.55, -0.30], [0.16, -0.10, -0.34]);
+  runSeq(s, seq);
+  assert.ok(s.swingBlend > 0.5, `setup: blend should be high (${s.swingBlend})`);
+  const still = seq[seq.length - 1];
+  for (let i = 0; i < 45; i++) s.notePoseFrame(still, 'right', DT); // 1.5s stall
+  assert.ok(s.swingBlend < 0.05, `blend should decay (${s.swingBlend})`);
+});
+
+report('left-handed swing mirrors: blade also sweeps down', () => {
+  const s = new BatTransformSolver();
+  const seq = swingSeq(8, [0.18, 0.55, -0.30], [0.16, -0.10, -0.34]).map((j) => ({
+    ...j,
+    lElbow: v(-j.rElbow.x, j.rElbow.y, j.rElbow.z),
+    lWrist: v(-j.rWrist.x, j.rWrist.y, j.rWrist.z),
+  }));
+  const r = runSeq(s, seq, 'left');
+  const last = r[seq.length - 1];
+  assert.ok(last.blend > 0.7, `left-handed blend (${last.blend})`);
+  assert.ok(last.batY.y < -0.2, `left-handed blade should point down (${last.batY.y})`);
 });
 
 console.log(failures === 0 ? '\nAll bat-orientation sanity checks passed.\n' : `\n${failures} check(s) FAILED.\n`);

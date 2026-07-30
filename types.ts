@@ -28,6 +28,13 @@ export type LandmarkSpace = 'world' | 'image';
 export interface PoseLandmarkFrame {
   landmarks: Landmark[];
   space: LandmarkSpace;
+  /**
+   * performance.now() of the pose callback that produced this frame. The
+   * render loop runs faster than the ~30 Hz pose stream, so consumers use
+   * this to detect genuinely new data (e.g. per-pose-frame velocity
+   * estimates) instead of re-reading identical landmarks every render.
+   */
+  timeMs?: number;
 }
 
 export enum GameState {
