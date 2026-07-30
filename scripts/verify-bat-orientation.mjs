@@ -444,5 +444,80 @@ report('left-handed swing mirrors: blade also sweeps down', () => {
   assert.ok(last.batY.y < -0.2, `left-handed blade should point down (${last.batY.y})`);
 });
 
+// ---------------------------------------------------------------------------
+console.log('\n--- locomotion rejection (torso-relative swing velocity) ---');
+
+/** Translate every joint of a pose by the same offset (whole-body motion). */
+const translated = (j, dx, dy, dz) => {
+  const out = {};
+  for (const k of Object.keys(j)) out[k] = j[k].clone().add(v(dx, dy, dz));
+  return out;
+};
+
+report('whole-body locomotion never raises swingBlend (common-mode rejection)', () => {
+  const s = new BatTransformSolver();
+  // 1.5s of vigorous shuffling: every joint translates together at peak
+  // ~2.0 u/s lateral and ~1.1 u/s vertical — both ABOVE the swing ON
+  // thresholds — with the arm perfectly still relative to the torso.
+  // Without torso-relative rejection this reads as a continuous swing and
+  // wobbles the blade by blend*theta (~0.3 rad here) at the shuffle rhythm.
+  const seq = [];
+  for (let f = 0; f < 45; f++) {
+    const t = f * DT;
+    const dx = 0.35 * Math.sin(2 * Math.PI * 0.9 * t);
+    const dy = 0.10 * Math.sin(2 * Math.PI * 1.8 * t);
+    seq.push(translated(stanceJoints(), dx, dy, 0));
+  }
+  const r = runSeq(s, seq);
+  const maxBlend = Math.max(...r.map((f) => f.blend));
+  assert.ok(maxBlend < 0.05, `locomotion raised blend to ${maxBlend}`);
+});
+
+report('arm motion relative to a moving torso still registers as a swing', () => {
+  const s = new BatTransformSolver();
+  // The fast-downswing sequence ON TOP OF vigorous whole-body locomotion:
+  // the wrist's torso-relative path is unchanged, so the blend must still
+  // rise — rejection must not deaden real swings played while moving.
+  const seq = swingSeq(8, [0.18, 0.55, -0.30], [0.16, -0.10, -0.34])
+    .map((j, f) => translated(j, 0.15 * Math.sin((2 * Math.PI * f) / 15), 0, 0));
+  const r = runSeq(s, seq);
+  const last = r[seq.length - 1];
+  assert.ok(last.blend > 0.5, `relative swing under locomotion should register (${last.blend})`);
+  assert.ok(last.batY.y < -0.1, `blade should still sweep down (${last.batY.y})`);
+});
+
+console.log('\n--- reference-band continuity (no fallback flapping) ---');
+
+report('forearm swept through the up-parallel band: blade never jumps', () => {
+  // Sweep the grip forearm from 35 deg off-vertical to straight down in
+  // fine 0.5 deg steps, right through REF_BLEND_START..PARALLEL_LIMIT.
+  // Geometry forces the blade through ~90 deg across the band (plumb ->
+  // forward-horizontal), so a CONTINUOUS handoff still ramps ~12 deg per
+  // step mid-band — but the old hard switch teleported the full ~90 deg
+  // in a single frame whenever wrist noise straddled the threshold.
+  const s = new BatTransformSolver();
+  const j = stanceJoints();
+  j.rElbow = v(0.24, 0.35, -0.05);
+  const pos = new THREE.Vector3();
+  const quat = new THREE.Quaternion();
+  let maxStep = 0;
+  let prevY = null;
+  let upDotAtRest = 0;
+  for (let f = 0; f <= 70; f++) {
+    const ang = ((35 - (35 * f) / 70) * Math.PI) / 180; // 0.5 deg per frame
+    j.rWrist = v(0.24 + 0.3 * Math.sin(ang), 0.35 - 0.3 * Math.cos(ang), -0.05);
+    assert.ok(s.solve(j, 'right', pos, quat), `solve failed at frame ${f}`);
+    const batY = new THREE.Vector3(0, 1, 0).applyQuaternion(quat);
+    if (prevY) maxStep = Math.max(maxStep, (batY.angleTo(prevY) * 180) / Math.PI);
+    prevY = batY.clone();
+    if (f === 0) upDotAtRest = batY.y;
+  }
+  assert.ok(upDotAtRest > 0.3, `outside the band the blade stays plumb (${upDotAtRest})`);
+  assert.ok(maxStep < 20, `blade jumped ${maxStep.toFixed(1)} deg between adjacent band frames (discontinuous switch was ~90)`);
+  // Arm fully down (deep fallback): blade horizontal, leaning chest-forward.
+  const fwd = new THREE.Vector3().crossVectors(bodyUpOf(j), new THREE.Vector3().subVectors(j.rShoulder, j.lShoulder).normalize()).normalize();
+  assert.ok(prevY.dot(fwd) > 0.8, `fully-down arm should point the blade forward (${prevY.dot(fwd)})`);
+});
+
 console.log(failures === 0 ? '\nAll bat-orientation sanity checks passed.\n' : `\n${failures} check(s) FAILED.\n`);
 process.exit(failures === 0 ? 0 : 1);

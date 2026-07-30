@@ -248,23 +248,29 @@ export const Avatar: React.FC<AvatarProps> = ({
     // Swing phase detection runs on the POSE clock (frame.timeMs), not the
     // render clock: the landmarks only change per pose frame, so diffing
     // per render frame would alias a fast swing into alternating v/0
-    // readings and underestimate proportionally to the display rate.
+    // readings and underestimate proportionally to the display rate. The
+    // bat damper's adaptive cutoff updates on the same boundary (it would
+    // sawtooth if re-derived per render frame from a stepped target) —
+    // poseAdvanced/poseDt carry the sample clock to both.
+    let poseAdvanced = false;
+    let poseDt = 1 / 30;
     const poseTime = hasPose && typeof frame.timeMs === 'number' ? frame.timeMs : -1;
     if (poseTime >= 0) {
       const prevTime = lastPoseTimeRef.current;
       if (poseTime !== prevTime) {
         lastPoseTimeRef.current = poseTime;
+        poseAdvanced = true;
         if (prevTime < 0) {
           // First real pose frame after the menu default pose: prime the
           // velocity estimate — diffing against the default stance would
           // read the teleport as a phantom swing.
           batSolver.resetSwing();
-          batSolver.notePoseFrame(batJoints, hand, 1 / 30);
+          batSolver.notePoseFrame(batJoints, hand, poseDt);
         } else {
-          let dtPose = (poseTime - prevTime) / 1000;
-          if (dtPose < 1 / 240) dtPose = 1 / 240;
-          else if (dtPose > 0.5) dtPose = 0.5;
-          batSolver.notePoseFrame(batJoints, hand, dtPose);
+          poseDt = (poseTime - prevTime) / 1000;
+          if (poseDt < 1 / 240) poseDt = 1 / 240;
+          else if (poseDt > 0.5) poseDt = 0.5;
+          batSolver.notePoseFrame(batJoints, hand, poseDt);
         }
       }
     } else if (lastPoseTimeRef.current >= 0) {
@@ -274,7 +280,7 @@ export const Avatar: React.FC<AvatarProps> = ({
     }
 
     if (batSolver.solve(batJoints, hand, batPos, targetQuat)) {
-      batSmoother.filter(batPos, targetQuat, delta, dampedPos, dampedQuat);
+      batSmoother.filter(batPos, targetQuat, delta, dampedPos, dampedQuat, poseAdvanced, poseDt);
     }
 
     if (visualBatRef.current) {

@@ -379,6 +379,76 @@ console.log('\n--- bat transform damping (derived-level) ---');
   });
 }
 
+console.log('\n--- bat damper: render-cadence decoupling (30Hz target, 60Hz render) ---');
+{
+  // Mirror Avatar.tsx: the solved target only changes per POSE frame; the
+  // damper runs per RENDER frame and only adapts its cutoff when the
+  // caller marks a new sample. Assert (a) the 30 Hz target steps are
+  // damped well below the input, (b) convergence continues BETWEEN samples
+  // (no step-then-freeze stair-stepping), (c) a step target still settles
+  // inside a responsiveness bound.
+  const POSE_DT = 1 / 30, RENDER_DT = 1 / 60;
+  const smoother = new BatTransformSmoother();
+  const baseQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.3, 0.2, -0.1));
+  const baseP = new THREE.Vector3(0.35, -0.2, -0.35);
+  const outP = new THREE.Vector3(), outQ = new THREE.Quaternion();
+  const axis = new THREE.Vector3(), qNoise = new THREE.Quaternion();
+  const qTarget = new THREE.Quaternion(), pTarget = new THREE.Vector3();
+  const prevTargetQ = new THREE.Quaternion(), prevOutQ = new THREE.Quaternion();
+
+  const inSteps = [], outSteps = [], boundarySteps = [], offSteps = [];
+  let havePrev = false;
+  for (let pf = 0; pf < 300; pf++) {
+    axis.set(gauss(), gauss(), gauss()).normalize();
+    qNoise.setFromAxisAngle(axis, gauss() * 2 * Math.PI / 180);
+    qTarget.copy(baseQ).multiply(qNoise);
+    pTarget.set(baseP.x + gauss() * 0.002, baseP.y + gauss() * 0.002, baseP.z + gauss() * 0.002);
+    for (let r = 0; r < 2; r++) {
+      smoother.filter(pTarget, qTarget, RENDER_DT, outP, outQ, r === 0, POSE_DT);
+      if (pf > 30) {
+        if (r === 0) inSteps.push(qTarget.angleTo(prevTargetQ));
+        if (havePrev) {
+          const step = outQ.angleTo(prevOutQ);
+          outSteps.push(step);
+          (r === 0 ? boundarySteps : offSteps).push(step);
+        }
+        prevOutQ.copy(outQ);
+        havePrev = true;
+      }
+    }
+    prevTargetQ.copy(qTarget);
+  }
+  const rms = (a) => Math.sqrt(a.reduce((acc, x) => acc + x * x, 0) / a.length);
+  const mean = (a) => a.reduce((acc, x) => acc + x, 0) / a.length;
+  const inRms = rms(inSteps), outRms = rms(outSteps);
+  console.log(`        -> target step RMS ${(inRms * 180 / Math.PI).toFixed(3)} deg, output step RMS ${(outRms * 180 / Math.PI).toFixed(3)} deg`);
+  report('pose-cadence target steps damped >= 60% at render rate', () =>
+    assert.ok(outRms < inRms * 0.4, `ratio ${(outRms / inRms).toFixed(2)}`));
+  report('convergence continues between samples (no stair-step freeze)', () => {
+    const ratio = mean(offSteps) / Math.max(1e-12, mean(boundarySteps));
+    assert.ok(ratio > 0.2, `off-boundary mean step ratio ${ratio.toFixed(2)}`);
+  });
+
+  // Step response: one 30 deg target jump at the pose rate, then hold.
+  const stepper = new BatTransformSmoother();
+  const qStart = new THREE.Quaternion();
+  const qJump = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI / 6);
+  pTarget.copy(baseP);
+  stepper.filter(pTarget, qStart, RENDER_DT, outP, outQ, true, POSE_DT); // prime
+  let settleFrames = -1;
+  const window = 20; // render frames after the jump
+  for (let rf = 0; rf < window; rf++) {
+    // Target jumped once (pose frame 0); afterwards held constant while the
+    // damper keeps converging per render frame.
+    const isNew = rf % 2 === 0;
+    stepper.filter(pTarget, qJump, RENDER_DT, outP, outQ, isNew, POSE_DT);
+    if (settleFrames < 0 && outQ.angleTo(qJump) < 2 * Math.PI / 180) settleFrames = rf + 1;
+  }
+  console.log(`        -> 30 deg target jump: settled within ${settleFrames} render frame(s)`);
+  report('step response settles within 16 render frames (~0.27s)', () =>
+    assert.ok(settleFrames > 0 && settleFrames <= 16, `settle ${settleFrames}`));
+}
+
 console.log('\n--- irregular timestamps ---');
 {
   const smoother = makeImageSmoother();

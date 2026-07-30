@@ -16,15 +16,17 @@ import {
   IMAGE_SPACE_ARM_SMOOTHING,
   WORLD_SPACE_SMOOTHING,
   WORLD_SPACE_ARM_SMOOTHING,
-  UPPER_BODY_LANDMARKS,
+  BAT_FRAME_LANDMARKS,
   buildLandmarkOverrides,
 } from './services/poseSmoothing';
 
-// Per-landmark filter profiles: the bat-driving arm chain (shoulders,
-// elbows, wrists) gets the stronger variant; everything else uses the base
-// profile. Built once — LandmarkSmoother reads the table at construction.
-const IMAGE_OVERRIDES = buildLandmarkOverrides(33, UPPER_BODY_LANDMARKS, IMAGE_SPACE_ARM_SMOOTHING, IMAGE_SPACE_SMOOTHING);
-const WORLD_OVERRIDES = buildLandmarkOverrides(33, UPPER_BODY_LANDMARKS, WORLD_SPACE_ARM_SMOOTHING, WORLD_SPACE_SMOOTHING);
+// Per-landmark filter profiles: the bat-driving frame (shoulders, elbows,
+// wrists AND the hips the solver's body-up mixes in) gets the stronger
+// variant so anchor and orientation reference stay in lockstep; everything
+// else uses the base profile. Built once — LandmarkSmoother reads the
+// table at construction.
+const IMAGE_OVERRIDES = buildLandmarkOverrides(33, BAT_FRAME_LANDMARKS, IMAGE_SPACE_ARM_SMOOTHING, IMAGE_SPACE_SMOOTHING);
+const WORLD_OVERRIDES = buildLandmarkOverrides(33, BAT_FRAME_LANDMARKS, WORLD_SPACE_ARM_SMOOTHING, WORLD_SPACE_SMOOTHING);
 
 // Scripted local commentary — the default experience (Gemini is optional)
 const LOCAL_COMMENTARY: Record<ShotResult, string[]> = {
