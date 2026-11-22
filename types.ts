@@ -75,7 +75,11 @@ export interface GameStats {
  * vectors the bowling logic feeds to the cannon body:
  *  - pace  -> forward velocity (z, toward the batsman)
  *  - line  -> release velocity across the pitch (x; + = leg side, - = off side for a RHB)
- *  - dip   -> downward release velocity (y; closer to 0 = fuller length)
+ *  - dip   -> release velocity along y (negative = downward). Tuned against the
+ *            flight model in services/shotPhysics.ts so each delivery bounces
+ *            once and arrives at the bat and the stumps inside the heights the
+ *            harness asserts.
+ *  - releaseX -> lateral release point (x, world meters)
  *  - swing -> constant lateral drift applied while the ball is in flight (x accel, m/s^2)
  *  - spin  -> angular velocity [x, y, z]; z-axis spin is what rips sideways off the pitch
  */
@@ -89,6 +93,9 @@ export interface DeliveryScript {
   /** Scripted historical explainer: the real story plus the technique/physics. */
   educational: string;
   speedKmh: number; // headline pace, for display
+  /** Lateral release point, world meters. The ball is released from
+   *  [releaseX, 2.05, -18.5]. */
+  releaseX: number;
   pace: number;
   line: number;
   dip: number;
