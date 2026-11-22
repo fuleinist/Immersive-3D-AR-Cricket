@@ -43,7 +43,7 @@
  * Run: npm run verify:jitter
  */
 import { build } from 'esbuild';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 
@@ -69,8 +69,8 @@ const {
   WORLD_SPACE_ARM_SMOOTHING,
   BAT_FRAME_LANDMARKS,
   buildLandmarkOverrides,
-} = await import(path.join(cacheDir, 'pose-smoothing.bundle.mjs'));
-const { BatTransformSolver } = await import(path.join(cacheDir, 'bat-transform.bundle.mjs'));
+} = await import(pathToFileURL(path.join(cacheDir, 'pose-smoothing.bundle.mjs')).href);
+const { BatTransformSolver } = await import(pathToFileURL(path.join(cacheDir, 'bat-transform.bundle.mjs')).href);
 const THREE = await import('three');
 
 // Mirror App.tsx overrides.

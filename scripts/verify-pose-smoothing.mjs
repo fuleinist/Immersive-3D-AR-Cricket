@@ -23,7 +23,7 @@
  * Run: npm run verify:smoothing
  */
 import { build } from 'esbuild';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 
@@ -52,13 +52,13 @@ const {
   WORLD_SPACE_ARM_SMOOTHING,
   UPPER_BODY_LANDMARKS,
   buildLandmarkOverrides,
-} = await import(path.join(cacheDir, 'pose-smoothing.bundle.mjs'));
+} = await import(pathToFileURL(path.join(cacheDir, 'pose-smoothing.bundle.mjs')).href);
 const {
   adaptSeatedLandmarks,
   SEATED_METRIC_SHOULDER_WIDTH,
   SEATED_METRIC_ANKLE_DEPTH,
-} = await import(path.join(cacheDir, 'tracking-mode.bundle.mjs'));
-const { BatTransformSolver } = await import(path.join(cacheDir, 'bat-transform.bundle.mjs'));
+} = await import(pathToFileURL(path.join(cacheDir, 'tracking-mode.bundle.mjs')).href);
+const { BatTransformSolver } = await import(pathToFileURL(path.join(cacheDir, 'bat-transform.bundle.mjs')).href);
 const THREE = await import('three');
 
 // Mirror App.tsx: arm chain gets the stronger per-landmark profile.
