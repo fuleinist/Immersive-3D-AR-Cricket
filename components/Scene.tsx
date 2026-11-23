@@ -1,10 +1,18 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { Physics, usePlane, useCylinder } from '@react-three/cannon';
 import { Environment, PerspectiveCamera, ContactShadows } from '@react-three/drei';
 import { Avatar } from './Avatar';
 import { Ball } from './Ball';
 import { PoseLandmarkFrame, GameState, GameMode, ShotResult, Stance, DeliveryScript, ResolvedTrackingMode } from '../types';
+import {
+  BatFrameState,
+  createBatFrameState,
+  STUMP_PLANE_Z,
+  STUMP_XS,
+  STUMP_RADIUS,
+  STUMP_HEIGHT,
+} from '../services/shotPhysics';
 import { Vector3, Mesh } from 'three';
 
 interface SceneProps {
@@ -37,31 +45,60 @@ export const Scene: React.FC<SceneProps> = ({
 }) => {
 
   const handleHit = (vel: Vector3, pos: Vector3) => {
-    // Relative speed in km/h
-    const speed = vel.length() * 3.6;
+    // The exit velocity is the true 3D velocity the swept collider produced, so
+    // both the speed and the launch elevation are real numbers now (defect 2:
+    // the old handler never set the ball's velocity at all).
+    const speed = vel.length() * 3.6; // km/h
+    const horizontal = Math.hypot(vel.x, vel.z);
+    const elevationDeg = horizontal > 1e-6
+      ? (Math.atan2(vel.y, horizontal) * 180) / Math.PI
+      : 0;
+
+    // Scoring reads the exit velocity and the launch elevation. A hit that
+    // leaves low and hard is four runs or a dot ball; the six needs air under
+    // it. A touched ball is never a MISS: MISS now means the ball beat the bat
+    // (see handleMiss).
     let result = ShotResult.DEFENSE;
-    
-    // More physics-based scoring
-    // If speed is high and it's hit significantly forward (Z direction)
-    if (speed > 85 && vel.z < -5) {
-        result = ShotResult.SIX;
+    if (speed > 85 && vel.z < -5 && elevationDeg >= 10) {
+      result = ShotResult.SIX;
     } else if (speed > 45 && vel.z < -2) {
-        result = ShotResult.FOUR;
-    } else if (speed > 15) {
-        result = ShotResult.DEFENSE;
-    } else {
-        result = ShotResult.MISS; // Too weak to count
+      result = ShotResult.FOUR;
     }
 
-    const distance = (speed * speed) / 20; // Rough physics approximation for flight dist
+    // Carry estimate to first bounce from bat height, ignoring roll-out. The
+    // display only needs a believable distance, not a shot tracer.
+    const v = speed / 3.6;
+    const elevationRad = (elevationDeg * Math.PI) / 180;
+    const vh = Math.max(v * Math.cos(elevationRad), 0);
+    const vy = v * Math.sin(elevationRad);
+    const g = 9.8;
+    const batHeight = 1.0;
+    const flightSeconds = (vy + Math.sqrt(Math.max(vy * vy + 2 * g * batHeight, 0))) / g;
+    const distance = vh * flightSeconds;
+
     // pos.z is where the ball met the bat on the pitch axis — used as a
     // shot-timing proxy by the coaching overlay (lower = further in front)
     onBallOutcome(result, speed, distance, pos.z);
   };
 
   const handleMiss = () => {
+    // BEATEN: the ball passed the stumps without touching bat or stumps. This
+    // used to hardcode OUT, which made MISS unreachable.
+    onBallOutcome(ShotResult.MISS, 0, 0);
+  };
+
+  const handleBowled = () => {
+    // BOWLED: the ball crossed the stump plane inside the stump zone.
+    // BallRecord.speed is the shot speed, so it stays 0 for a dismissal.
     onBallOutcome(ShotResult.OUT, 0, 0);
   };
+
+  // One shared bat-state object for the whole match: Avatar publishes into it
+  // and Ball sweeps against it. Created once, never captured at mount.
+  const batFrame = useMemo<React.MutableRefObject<BatFrameState>>(
+    () => ({ current: createBatFrameState() }),
+    [],
+  );
 
   const shouldShowAvatar = gameState === GameState.MENU || gameState === GameState.BATTING || gameState === GameState.FINISHED;
 
@@ -89,6 +126,7 @@ export const Scene: React.FC<SceneProps> = ({
              size={avatarSize}
              positionOffset={avatarOffset}
              lateralOffset={lateralOffset}
+             batFrame={batFrame}
              trackingMode={trackingMode}
            />
         )}
@@ -98,7 +136,9 @@ export const Scene: React.FC<SceneProps> = ({
             delivery={delivery}
             onHit={handleHit}
             onMiss={handleMiss}
+            onBowled={handleBowled}
             resetTrigger={resetTrigger}
+            batFrame={batFrame}
         />
 
         <Stumps />
@@ -113,33 +153,30 @@ export const Scene: React.FC<SceneProps> = ({
 };
 
 const Stumps = () => {
-    // Physical stumps
-    // Stumps are roughly 71cm high, each 3.8cm diameter
-    const stumpRadius = 0.02;
-    const stumpHeight = 0.71;
-    const stumpArgs: [number, number, number, number] = [stumpRadius, stumpRadius, stumpHeight, 8];
-    
-    const [stump1] = useCylinder(() => ({ name: 'stump', args: stumpArgs, position: [-0.1, stumpHeight/2, 0], type: 'Static' }));
-    const [stump2] = useCylinder(() => ({ name: 'stump', args: stumpArgs, position: [0, stumpHeight/2, 0], type: 'Static' }));
-    const [stump3] = useCylinder(() => ({ name: 'stump', args: stumpArgs, position: [0.1, stumpHeight/2, 0], type: 'Static' }));
+    // The stumps stand on the same plane the stump-zone test scores against.
+    // Before this they sat at world z = 0 while the visual bails floated at
+    // z = +0.5 through a group offset, so the drawn stumps, the physics bodies
+    // and the dismissal test all disagreed (defect 4).
+    const stumpArgs: [number, number, number, number] = [STUMP_RADIUS, STUMP_RADIUS, STUMP_HEIGHT, 8];
+
+    const [stump1] = useCylinder(() => ({ name: 'stump', args: stumpArgs, position: [STUMP_XS[0], STUMP_HEIGHT / 2, STUMP_PLANE_Z], type: 'Static' }));
+    const [stump2] = useCylinder(() => ({ name: 'stump', args: stumpArgs, position: [STUMP_XS[1], STUMP_HEIGHT / 2, STUMP_PLANE_Z], type: 'Static' }));
+    const [stump3] = useCylinder(() => ({ name: 'stump', args: stumpArgs, position: [STUMP_XS[2], STUMP_HEIGHT / 2, STUMP_PLANE_Z], type: 'Static' }));
+
+    const stumpRefs = [stump1, stump2, stump3];
+    const bailLength = STUMP_XS[2] - STUMP_XS[0] + 2 * STUMP_RADIUS;
 
     return (
-        <group position={[0, 0, 0.5]}>
-            <mesh ref={stump1 as any} castShadow>
-                <cylinderGeometry args={stumpArgs} />
-                <meshStandardMaterial color="#eeeeee" roughness={0.1} />
-            </mesh>
-            <mesh ref={stump2 as any} castShadow>
-                <cylinderGeometry args={stumpArgs} />
-                <meshStandardMaterial color="#eeeeee" roughness={0.1} />
-            </mesh>
-             <mesh ref={stump3 as any} castShadow>
-                <cylinderGeometry args={stumpArgs} />
-                <meshStandardMaterial color="#eeeeee" roughness={0.1} />
-            </mesh>
-            {/* Bails */}
-            <mesh position={[0, 0.71, 0]}>
-                <boxGeometry args={[0.22, 0.02, 0.02]} />
+        <group>
+            {stumpRefs.map((ref, index) => (
+                <mesh key={index} ref={ref as any} name="stump" castShadow>
+                    <cylinderGeometry args={stumpArgs} />
+                    <meshStandardMaterial color="#eeeeee" roughness={0.1} />
+                </mesh>
+            ))}
+            {/* Bails sit on top of the stumps, on the same plane. */}
+            <mesh position={[0, STUMP_HEIGHT, STUMP_PLANE_Z]} name="bail">
+                <boxGeometry args={[bailLength, 0.02, 0.02]} />
                 <meshStandardMaterial color="#cc0000" />
             </mesh>
         </group>

@@ -35,7 +35,7 @@
  * Run: npm run verify:bat
  */
 import { build } from 'esbuild';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 
@@ -55,8 +55,8 @@ await build({
   logLevel: 'silent',
 });
 
-const { BatTransformSolver } = await import(path.join(cacheDir, 'bat-transform.bundle.mjs'));
-const { adaptSeatedLandmarks } = await import(path.join(cacheDir, 'tracking-mode.bundle.mjs'));
+const { BatTransformSolver } = await import(pathToFileURL(path.join(cacheDir, 'bat-transform.bundle.mjs')).href);
+const { adaptSeatedLandmarks } = await import(pathToFileURL(path.join(cacheDir, 'tracking-mode.bundle.mjs')).href);
 const THREE = await import('three');
 
 let failures = 0;

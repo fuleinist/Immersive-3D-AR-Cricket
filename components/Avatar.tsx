@@ -4,6 +4,7 @@ import { useBox } from '@react-three/cannon';
 import * as THREE from 'three';
 import { Landmark, PoseLandmarkFrame, Stance, GameMode, TrackingMode, ResolvedTrackingMode } from '../types';
 import { BatTransformSolver, type BatJoints } from '../services/batTransform';
+import { BatFrameState, CREASE_Z, BAT_BLADE_FRACTION } from '../services/shotPhysics';
 
 interface AvatarProps {
   landmarks: React.MutableRefObject<PoseLandmarkFrame | null>;
@@ -13,6 +14,9 @@ interface AvatarProps {
   positionOffset?: { x: number; y: number };
   /** Smoothed lateral root offset (world meters), updated per pose frame. */
   lateralOffset: React.MutableRefObject<number>;
+  /** Shared bat state: this component publishes the per-frame world sample,
+   *  Ball.tsx runs the swept collider against it. */
+  batFrame: React.MutableRefObject<BatFrameState>;
   trackingMode: ResolvedTrackingMode;
 }
 
@@ -59,6 +63,7 @@ export const Avatar: React.FC<AvatarProps> = ({
   size = 0.85,
   positionOffset = { x: 0, y: 0 },
   lateralOffset,
+  batFrame,
   trackingMode
 }) => {
   const jointsRef = useRef<{ [key: string]: THREE.Mesh | null }>({});
@@ -84,14 +89,19 @@ export const Avatar: React.FC<AvatarProps> = ({
     type: 'Kinematic',
     args: [batWidth * size, batHeight * size, batDepth * size],
     position: [0, -10, 0],
-    onCollide: (e) => {
-        // Handled in Ball.tsx
-    }
+    // A kinematic body has zero velocity in cannon-es, so a contact event from
+    // it can never carry bat speed (defect 2). Bat-ball contact is decided by
+    // the swept collider over the whole blade, so this body's collisions are
+    // switched off entirely - it remains only as the EASY-mode hitbox.
+    collisionFilterMask: 0,
   }));
 
   const defaultPose = useMemo(() => GET_DEFAULT_POSE(stance === Stance.RIGHT), [stance]);
   const lateralBase = stance === Stance.RIGHT ? 0.45 : -0.45;
-  const creaseZ = 1.35;
+  // The batting position is the crease line, not a metre in front of it: the
+  // stumps are behind the batter at STUMP_PLANE_Z, and the swept collider tests
+  // the blade against the ball as it crosses that plane.
+  const creaseZ = CREASE_Z;
 
   // Preallocated per-frame scratch: the pose update runs every render frame,
   // so nothing in the hot path may allocate.
@@ -110,6 +120,7 @@ export const Avatar: React.FC<AvatarProps> = ({
     worldPos: new THREE.Vector3(), worldQuat: new THREE.Quaternion(),
     euler: new THREE.Euler(),
     up: new THREE.Vector3(0, 1, 0),
+    samplePoint: new THREE.Vector3(),
   }), []);
 
   // Grip-anchored bat solver. The bat is a rigid extension of the arm:
@@ -164,6 +175,22 @@ export const Avatar: React.FC<AvatarProps> = ({
     mesh.scale.set(thickness * size, length, thickness * size);
     mesh.position.copy(p1).addScaledVector(direction, 0.5);
     mesh.quaternion.setFromUnitVectors(scratch.up, direction.divideScalar(length));
+  };
+
+  // Publishing the bat sample must not allocate either: both helpers write into
+  // caller-owned objects through the scratch vector.
+  const publishLocalPoint = (px: number, py: number, pz: number, quat: THREE.Quaternion, origin: THREE.Vector3, out: { x: number; y: number; z: number }) => {
+    const v = scratch.samplePoint.set(px, py, pz).applyQuaternion(quat);
+    out.x = v.x + origin.x;
+    out.y = v.y + origin.y;
+    out.z = v.z + origin.z;
+  };
+
+  const publishLocalAxis = (px: number, py: number, pz: number, quat: THREE.Quaternion, out: { x: number; y: number; z: number }) => {
+    const v = scratch.samplePoint.set(px, py, pz).applyQuaternion(quat);
+    out.x = v.x;
+    out.y = v.y;
+    out.z = v.z;
   };
 
   useFrame(() => {
@@ -280,6 +307,20 @@ export const Avatar: React.FC<AvatarProps> = ({
       batSolver.resetSwing();
     }
 
+    // The swept collider's guards run before this frame's sample is written, so
+    // the sample still holds the previous frame's points - those are the sweep's
+    // start. A pose stream that stalls for more than POSE_STALL_MS, or a wrist
+    // whose visibility drops below MIN_VISIBILITY, drops the history instead of
+    // guessing a swing from stale points.
+    const batState = batFrame.current;
+    const wrist = l[hand === 'right' ? 16 : 15];
+    const wristVisibility = typeof wrist.visibility === 'number' ? wrist.visibility : 0;
+    batState.collider.beginFrame(wristVisibility, poseTime);
+    batState.dtSeconds = poseDt;
+    batState.halfWidth = (batWidth * size) / 2;
+    batState.halfThickness = (batDepth * size) / 2;
+    batState.armed = hasPose;
+
     // Rigid binding: the solved transform IS the bat's transform for this
     // render frame — no downstream damper, so the bat is a pure function
     // of the same smoothed joints plus the declared swingBlend state (at
@@ -297,6 +338,19 @@ export const Avatar: React.FC<AvatarProps> = ({
       batApi.position.set(worldPos.x, worldPos.y, worldPos.z);
       euler.setFromQuaternion(worldQuat);
       batApi.rotation.set(euler.x, euler.y, euler.z);
+
+      // Publish the frame Ball.tsx sweeps against: grip is the bat frame origin
+      // (the selected wrist), toe is bat-local (0, +0.82 * size, 0), face normal
+      // is local +Z, right axis is local +X. Same world quaternion the physics
+      // body just used, so the sample cannot disagree with the visible bat.
+      const sample = batState.sample;
+      sample.gripWorld.x = worldPos.x;
+      sample.gripWorld.y = worldPos.y;
+      sample.gripWorld.z = worldPos.z;
+      publishLocalPoint(0, BAT_BLADE_FRACTION * size, 0, worldQuat, worldPos, sample.toeWorld);
+      publishLocalAxis(0, 0, 1, worldQuat, sample.faceNormalWorld);
+      publishLocalAxis(1, 0, 0, worldQuat, sample.rightAxisWorld);
+      sample.timestampMs = poseTime;
     }
   });
 

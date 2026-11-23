@@ -21,7 +21,7 @@
  * Run: npm run verify:lateral
  */
 import { build } from 'esbuild';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 
@@ -37,7 +37,7 @@ await build({
   logLevel: 'silent',
 });
 
-const { LateralRootTracker, LATERAL_ROOT_TUNING } = await import(outfile);
+const { LateralRootTracker, LATERAL_ROOT_TUNING } = await import(pathToFileURL(outfile).href);
 
 const DT = 1 / 30;
 const VIS = 0.95;

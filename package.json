@@ -15,7 +15,8 @@
     "verify:smoothing": "node scripts/verify-pose-smoothing.mjs",
     "verify:bat": "node scripts/verify-bat-orientation.mjs",
     "verify:jitter": "node scripts/verify-bat-jitter.mjs",
-    "verify:lateral": "node scripts/verify-lateral-root.mjs"
+    "verify:lateral": "node scripts/verify-lateral-root.mjs",
+    "verify:physics": "node scripts/verify-shot-physics.mjs"
   },
   "dependencies": {
     "@google/genai": "1.37.0",

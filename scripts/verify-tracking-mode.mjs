@@ -12,7 +12,7 @@
  * Run: npm run verify:tracking
  */
 import { build } from 'esbuild';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 
@@ -36,7 +36,7 @@ const {
   MODE_WINDOW_FRAMES,
   SEATED_METRIC_SHOULDER_WIDTH,
   SEATED_METRIC_ANKLE_DEPTH,
-} = await import(outfile);
+} = await import(pathToFileURL(outfile).href);
 
 const lm = (x, y, z, visibility) => ({ x, y, z, visibility });
 
