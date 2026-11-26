@@ -22,12 +22,12 @@ const resultBadge = (result: ShotResult): { label: string; className: string } =
   }
 };
 
-const resultLabel = (result: ShotResult): string => {
-  switch (result) {
+const resultLabel = (ball: BallRecord): string => {
+  switch (ball.result) {
     case ShotResult.SIX: return 'SIX!';
     case ShotResult.FOUR: return 'FOUR';
-    case ShotResult.OUT: return 'BOWLED';
-    case ShotResult.DEFENSE: return 'Defended';
+    case ShotResult.OUT: return ball.caughtBy ? `CAUGHT - ${ball.caughtBy}` : 'BOWLED';
+    case ShotResult.DEFENSE: return ball.runs > 0 ? `${ball.runs} RUN${ball.runs === 1 ? '' : 'S'}` : 'Defended';
     default: return 'Beaten';
   }
 };
@@ -98,7 +98,9 @@ export const ResultCard: React.FC<ResultCardProps> = ({ history, onPlayAgain }) 
 
         <div className="divide-y divide-white/10 border-y border-white/10">
           {history.map((ball, i) => {
-            const badge = resultBadge(ball.result);
+            const badge = ball.result === ShotResult.DEFENSE && ball.runs > 0
+              ? { label: String(ball.runs), className: 'bg-blue-600 text-white' }
+              : resultBadge(ball.result);
             return (
               <div key={ball.delivery.id} className="flex items-center gap-3 py-3">
                 <div className="w-6 text-center font-mono text-gray-500">{i + 1}</div>
@@ -111,7 +113,7 @@ export const ResultCard: React.FC<ResultCardProps> = ({ history, onPlayAgain }) 
                     <span className="text-gray-400 font-normal text-sm"> · {ball.delivery.bowler}</span>
                   </div>
                   <div className="text-[11px] text-gray-500 uppercase tracking-wider">
-                    {resultLabel(ball.result)}
+                    {resultLabel(ball)}
                     {ball.speed > 0 && ` · ${ball.speed.toFixed(0)} km/h · ${ball.distance.toFixed(0)}m`}
                   </div>
                 </div>
