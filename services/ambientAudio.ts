@@ -25,7 +25,7 @@ let volume = DEFAULT_VOLUME;
  *  start() can't begin playback after stop() was called. */
 let playToken = 0;
 
-const ensureContext = (): AudioContext => {
+export const ensureContext = (): AudioContext => {
   if (!ctx) {
     const Ctor: typeof AudioContext | undefined =
       window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
@@ -104,3 +104,13 @@ export const setAmbientVolume = (nextVolume: number): void => {
 };
 
 export const isAmbientPlaying = (): boolean => source !== null;
+
+/** Ramp the ambient loop level. Used by the SFX layer for the crowd swell. */
+export const rampAmbientVolume = (target: number, seconds: number): void => {
+  if (!gainNode || !ctx) return;
+  const clamped = Math.min(1, Math.max(0, target));
+  const now = ctx.currentTime;
+  gainNode.gain.cancelScheduledValues(now);
+  gainNode.gain.setValueAtTime(gainNode.gain.value, now);
+  gainNode.gain.linearRampToValueAtTime(clamped, now + Math.max(0, seconds));
+};

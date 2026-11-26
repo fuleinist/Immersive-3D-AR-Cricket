@@ -17,7 +17,8 @@
     "verify:jitter": "node scripts/verify-bat-jitter.mjs",
     "verify:lateral": "node scripts/verify-lateral-root.mjs",
     "verify:physics": "node scripts/verify-shot-physics.mjs",
-    "verify:fielding": "node scripts/verify-fielding-sim.mjs"
+    "verify:fielding": "node scripts/verify-fielding-sim.mjs",
+    "verify:sfx": "node scripts/verify-sound-effects.mjs"
   },
   "dependencies": {
     "@google/genai": "1.37.0",
