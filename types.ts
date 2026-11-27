@@ -114,6 +114,8 @@ export interface BallRecord {
   contactZ?: number;
   /** Fielding position that took the catch. Absent when the ball was not caught. */
   caughtBy?: string;
+  /** World-metres x/z where the ball was fielded or caught. Absent when the ball was not fielded. */
+  landingXZ?: [number, number];
 }
 
 /** User-selectable commentary overlay mode. */

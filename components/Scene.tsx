@@ -74,6 +74,7 @@ export const Scene: React.FC<SceneProps> = ({
     onBallOutcome(shot.result, speed, shot.distanceM, pos.z, {
       runs: shot.runs,
       caughtByLabel: shot.caughtByLabel,
+      landingXZ: shot.landingXZ,
     });
   };
 
