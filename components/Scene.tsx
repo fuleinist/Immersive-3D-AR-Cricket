@@ -1,20 +1,18 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import { Canvas } from '@react-three/fiber';
-import { Physics, usePlane, useCylinder } from '@react-three/cannon';
+import { Physics, usePlane } from '@react-three/cannon';
 import { Environment, PerspectiveCamera, ContactShadows } from '@react-three/drei';
 import { Avatar } from './Avatar';
 import { Ball } from './Ball';
+import { Stumps } from './Stumps';
 import { PoseLandmarkFrame, GameState, GameMode, ShotResult, Stance, DeliveryScript, ResolvedTrackingMode } from '../types';
 import {
   BatFrameState,
   createBatFrameState,
-  STUMP_PLANE_Z,
-  STUMP_XS,
-  STUMP_RADIUS,
-  STUMP_HEIGHT,
 } from '../services/shotPhysics';
 import { resolveShot } from '../services/shotOutcome';
 import type { ShotOutcomeDetail } from '../services/shotOutcome';
+import { resolveStumpImpact, type StumpImpactState } from '../services/stumpImpact';
 import { Vector3, Mesh } from 'three';
 
 interface SceneProps {
@@ -52,6 +50,11 @@ export const Scene: React.FC<SceneProps> = ({
   trackingMode
 }) => {
 
+  // The stump reaction is pure state (services/stumpImpact.ts), so the scene only
+  // holds the current state and a key that tells Stumps a new hit has landed.
+  const [impact, setImpact] = useState<StumpImpactState | null>(null);
+  const [impactKey, setImpactKey] = useState(0);
+
   const handleHit = (vel: Vector3, pos: Vector3) => {
     // The exit velocity is the true 3D velocity the swept collider produced, so
     // both the speed and the launch elevation are real numbers now (defect 2:
@@ -84,9 +87,11 @@ export const Scene: React.FC<SceneProps> = ({
     onBallOutcome(ShotResult.MISS, 0, 0);
   };
 
-  const handleBowled = () => {
+  const handleBowled = (point: Vector3, speed: number) => {
     // BOWLED: the ball crossed the stump plane inside the stump zone.
     // BallRecord.speed is the shot speed, so it stays 0 for a dismissal.
+    setImpact(resolveStumpImpact({ x: point.x, y: point.y, z: point.z }, speed, impactKey + 1));
+    setImpactKey((key) => key + 1);
     onBallOutcome(ShotResult.OUT, 0, 0);
   };
 
@@ -138,7 +143,7 @@ export const Scene: React.FC<SceneProps> = ({
             batFrame={batFrame}
         />
 
-        <Stumps />
+        <Stumps impact={impact} impactKey={impactKey} resetTrigger={resetTrigger} />
         <Pitch />
       </Physics>
 
@@ -148,37 +153,6 @@ export const Scene: React.FC<SceneProps> = ({
     </Canvas>
   );
 };
-
-const Stumps = () => {
-    // The stumps stand on the same plane the stump-zone test scores against.
-    // Before this they sat at world z = 0 while the visual bails floated at
-    // z = +0.5 through a group offset, so the drawn stumps, the physics bodies
-    // and the dismissal test all disagreed (defect 4).
-    const stumpArgs: [number, number, number, number] = [STUMP_RADIUS, STUMP_RADIUS, STUMP_HEIGHT, 8];
-
-    const [stump1] = useCylinder(() => ({ name: 'stump', args: stumpArgs, position: [STUMP_XS[0], STUMP_HEIGHT / 2, STUMP_PLANE_Z], type: 'Static' }));
-    const [stump2] = useCylinder(() => ({ name: 'stump', args: stumpArgs, position: [STUMP_XS[1], STUMP_HEIGHT / 2, STUMP_PLANE_Z], type: 'Static' }));
-    const [stump3] = useCylinder(() => ({ name: 'stump', args: stumpArgs, position: [STUMP_XS[2], STUMP_HEIGHT / 2, STUMP_PLANE_Z], type: 'Static' }));
-
-    const stumpRefs = [stump1, stump2, stump3];
-    const bailLength = STUMP_XS[2] - STUMP_XS[0] + 2 * STUMP_RADIUS;
-
-    return (
-        <group>
-            {stumpRefs.map((ref, index) => (
-                <mesh key={index} ref={ref as any} name="stump" castShadow>
-                    <cylinderGeometry args={stumpArgs} />
-                    <meshStandardMaterial color="#eeeeee" roughness={0.1} />
-                </mesh>
-            ))}
-            {/* Bails sit on top of the stumps, on the same plane. */}
-            <mesh position={[0, STUMP_HEIGHT, STUMP_PLANE_Z]} name="bail">
-                <boxGeometry args={[bailLength, 0.02, 0.02]} />
-                <meshStandardMaterial color="#cc0000" />
-            </mesh>
-        </group>
-    )
-}
 
 const Pitch = () => {
     const [ref] = usePlane(() => ({ 
