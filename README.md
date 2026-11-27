@@ -2,6 +2,8 @@
 
 Webcam-AR cricket batting game. MediaPipe pose tracking watches your swing through the webcam and drives a 3D avatar (React Three Fiber) facing famous scripted deliveries.
 
+At bat contact the ball holds still for a beat, and a harder hit holds it longer. A short trail follows the ball in flight.
+
 ## Requirements
 
 - Node.js 20+

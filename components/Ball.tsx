@@ -12,6 +12,7 @@ import {
   stumpSegmentTest,
   PITCH_RESTITUTION,
 } from '../services/shotPhysics';
+import { BallTrail as BallTrailModel, HitStopGate } from '../services/impactJuice';
 
 interface BallProps {
   gameState: GameState;
@@ -25,6 +26,8 @@ interface BallProps {
   resetTrigger: number;
   /** Bat state published by Avatar; the swept collider is run against it here. */
   batFrame: React.MutableRefObject<BatFrameState>;
+  /** Shared trail model; components/BallTrail.tsx draws it. */
+  trail: BallTrailModel;
 }
 
 export const Ball: React.FC<BallProps> = ({
@@ -35,6 +38,7 @@ export const Ball: React.FC<BallProps> = ({
   onBowled,
   resetTrigger,
   batFrame,
+  trail,
 }) => {
   // Realistic physics radius (standard cricket ball is ~0.036m radius)
   // We use a consistent radius for ball vs stumps/bat to avoid "teleporting"
@@ -86,6 +90,11 @@ export const Ball: React.FC<BallProps> = ({
   const outcomeFiredRef = useRef(false);
   const liveRef = useRef(false);
 
+  // Contact juice: the gate freezes the ball for a few frames at bat contact
+  // and then ramps it back to the exit velocity the scoring path already used.
+  const hitStop = useMemo(() => new HitStopGate(), []);
+  const exitVelocityRef = useMemo(() => new Vector3(), []);
+
   useEffect(() => {
     const unsubscribe = api.position.subscribe((v) => scratch.pos.set(v[0], v[1], v[2]));
     return unsubscribe;
@@ -105,6 +114,9 @@ export const Ball: React.FC<BallProps> = ({
     outcomeFiredRef.current = false;
     liveRef.current = false;
     batFrame.current.collider.resetHistory();
+    hitStop.reset();
+    exitVelocityRef.set(0, 0, 0);
+    trail.reset();
 
     const releaseX = Number.isFinite(delivery.releaseX) ? delivery.releaseX : 0;
     scratch.pos.set(releaseX, 2.05, -18.5);
@@ -134,6 +146,22 @@ export const Ball: React.FC<BallProps> = ({
 
   useFrame((_, delta) => {
     if (!liveRef.current) return;
+
+    const nowMs = performance.now();
+
+    // Hit-stop: hold at contact, then hand the exit velocity back once. The
+    // scale is written every frame while the gate is live, so the body cannot
+    // drift between the freeze and the release.
+    const stopScale = hitStop.advance(nowMs);
+    if (hitStop.isActive) {
+      api.velocity.set(
+        exitVelocityRef.x * stopScale,
+        exitVelocityRef.y * stopScale,
+        exitVelocityRef.z * stopScale,
+      );
+    } else if (hitStop.consumeRelease()) {
+      api.velocity.set(exitVelocityRef.x, exitVelocityRef.y, exitVelocityRef.z);
+    }
 
     const state = batFrame.current;
     const { pos, vel, prevPos, prevVel, impact, stump, bounce, exitVelocity, contactPoint } = scratch;
@@ -167,6 +195,10 @@ export const Ball: React.FC<BallProps> = ({
 
         exitVelocity.set(impact.exitVelocity.x, impact.exitVelocity.y, impact.exitVelocity.z);
         contactPoint.set(impact.contactPoint.x, impact.contactPoint.y, impact.contactPoint.z);
+        // The gate freezes this exit velocity, not the incoming ball velocity,
+        // so the shot still leaves the bat at the speed the fielding model used.
+        exitVelocityRef.copy(exitVelocity);
+        hitStop.begin(exitVelocity.length(), nowMs);
         onHitRef.current(exitVelocity, contactPoint);
       }
     }
@@ -190,6 +222,11 @@ export const Ball: React.FC<BallProps> = ({
     if (pos.z > 60 || pos.z < -40 || Math.abs(pos.x) > 20 || pos.y < -5) {
       liveRef.current = false;
     }
+
+    // The trail follows the physics position only. The contact snap writes a
+    // contact point into api.position, and a trail sample taken from there
+    // would draw a spike back to the bat.
+    trail.push(pos.x, pos.y, pos.z, nowMs);
 
     // Both contact tests read the segment from the previous frame to this one,
     // so this frame's values become the next frame's history.
