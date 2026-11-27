@@ -13,6 +13,8 @@ import {
   STUMP_RADIUS,
   STUMP_HEIGHT,
 } from '../services/shotPhysics';
+import { resolveShot } from '../services/shotOutcome';
+import type { ShotOutcomeDetail } from '../services/shotOutcome';
 import { Vector3, Mesh } from 'three';
 
 interface SceneProps {
@@ -21,7 +23,13 @@ interface SceneProps {
   stance: Stance;
   gameMode: GameMode;
   delivery: DeliveryScript;
-  onBallOutcome: (result: ShotResult, speed: number, dist: number, contactZ?: number) => void;
+  onBallOutcome: (
+    result: ShotResult,
+    speed: number,
+    dist: number,
+    contactZ?: number,
+    detail?: ShotOutcomeDetail,
+  ) => void;
   resetTrigger: number;
   avatarSize?: number;
   avatarOffset?: { x: number; y: number };
@@ -54,31 +62,19 @@ export const Scene: React.FC<SceneProps> = ({
       ? (Math.atan2(vel.y, horizontal) * 180) / Math.PI
       : 0;
 
-    // Scoring reads the exit velocity and the launch elevation. A hit that
-    // leaves low and hard is four runs or a dot ball; the six needs air under
-    // it. A touched ball is never a MISS: MISS now means the ball beat the bat
-    // (see handleMiss).
-    let result = ShotResult.DEFENSE;
-    if (speed > 85 && vel.z < -5 && elevationDeg >= 10) {
-      result = ShotResult.SIX;
-    } else if (speed > 45 && vel.z < -2) {
-      result = ShotResult.FOUR;
-    }
-
-    // Carry estimate to first bounce from bat height, ignoring roll-out. The
-    // display only needs a believable distance, not a shot tracer.
-    const v = speed / 3.6;
-    const elevationRad = (elevationDeg * Math.PI) / 180;
-    const vh = Math.max(v * Math.cos(elevationRad), 0);
-    const vy = v * Math.sin(elevationRad);
-    const g = 9.8;
-    const batHeight = 1.0;
-    const flightSeconds = (vy + Math.sqrt(Math.max(vy * vy + 2 * g * batHeight, 0))) / g;
-    const distance = vh * flightSeconds;
+    // Scoring is the fielding model, not a scalar guess: the same exit velocity
+    // feeds the drag flight, the catch window, the rope and the fielder closing
+    // on the ball. A shot that beats the ring can be a single, a two or a three;
+    // a ball that hangs is caught. A touched ball is never a MISS: MISS now
+    // means the ball beat the bat (see handleMiss).
+    const shot = resolveShot(pos, vel, delivery.id);
 
     // pos.z is where the ball met the bat on the pitch axis — used as a
     // shot-timing proxy by the coaching overlay (lower = further in front)
-    onBallOutcome(result, speed, distance, pos.z);
+    onBallOutcome(shot.result, speed, shot.distanceM, pos.z, {
+      runs: shot.runs,
+      caughtByLabel: shot.caughtByLabel,
+    });
   };
 
   const handleMiss = () => {

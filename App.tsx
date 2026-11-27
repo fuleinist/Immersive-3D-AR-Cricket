@@ -8,6 +8,7 @@ import { GameState, GameMode, Landmark, PoseLandmarkFrame, PoseResults, ShotResu
 import { FAMOUS_DELIVERIES } from './data/famousDeliveries';
 import { getCoachingTips } from './data/coaching';
 import { generateCommentary, generateCoachingInsight } from './services/geminiService';
+import { runsForResult, type ShotOutcomeDetail } from './services/shotOutcome';
 import { startAmbient, stopAmbient } from './services/ambientAudio';
 import { sampleFrame, detectTrackingMode, adaptSeatedLandmarks, MODE_WINDOW_FRAMES, FrameSample } from './services/trackingMode';
 import { LateralRootTracker } from './services/lateralTracking';
@@ -269,12 +270,15 @@ const App: React.FC = () => {
     setResetTrigger(prev => prev + 1);
   }, []);
 
-  const handleBallOutcome = async (result: ShotResult, speed: number, distance: number, contactZ?: number) => {
+  const handleBallOutcome = async (result: ShotResult, speed: number, distance: number, contactZ?: number, detail?: ShotOutcomeDetail) => {
     const delivery = FAMOUS_DELIVERIES[deliveryIndex];
-    const runs = result === ShotResult.SIX ? 6 : result === ShotResult.FOUR ? 4 : 0;
+    // One rule decides the score: the fielding sim detail when the shot carried
+    // one, and the old 6/4/0 table for the beaten and bowled paths.
+    const runs = runsForResult(result, detail);
+    const caughtBy = detail?.caughtByLabel ?? null;
     const isLastDelivery = deliveryIndex >= FAMOUS_DELIVERIES.length - 1;
 
-    setHistory(prev => [...prev, { delivery, result, runs, speed, distance, contactZ }]);
+    setHistory(prev => [...prev, { delivery, result, runs, speed, distance, contactZ, caughtBy: caughtBy ?? undefined }]);
 
     const scripted = LOCAL_COMMENTARY[result][deliveryIndex % LOCAL_COMMENTARY[result].length];
     setStats(prev => ({
@@ -283,7 +287,9 @@ const App: React.FC = () => {
         ballsFaced: prev.ballsFaced + 1,
         lastShotSpeed: speed,
         lastShotDistance: distance,
-        commentary: result === ShotResult.OUT
+        commentary: caughtBy
+          ? `${caughtBy} takes it! Caught!`
+          : result === ShotResult.OUT
           ? `${delivery.bowler} strikes — ${scripted}`
           : scripted
     }));

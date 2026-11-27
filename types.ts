@@ -112,6 +112,8 @@ export interface BallRecord {
   distance: number; // meters
   /** Pitch-axis position of bat contact; lower = met further in front. Absent when beaten/bowled. */
   contactZ?: number;
+  /** Fielding position that took the catch. Absent when the ball was not caught. */
+  caughtBy?: string;
 }
 
 /** User-selectable commentary overlay mode. */
