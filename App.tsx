@@ -278,7 +278,7 @@ const App: React.FC = () => {
     const caughtBy = detail?.caughtByLabel ?? null;
     const isLastDelivery = deliveryIndex >= FAMOUS_DELIVERIES.length - 1;
 
-    setHistory(prev => [...prev, { delivery, result, runs, speed, distance, contactZ, caughtBy: caughtBy ?? undefined }]);
+    setHistory(prev => [...prev, { delivery, result, runs, speed, distance, contactZ, caughtBy: caughtBy ?? undefined, landingXZ: detail?.landingXZ }]);
 
     const scripted = LOCAL_COMMENTARY[result][deliveryIndex % LOCAL_COMMENTARY[result].length];
     setStats(prev => ({

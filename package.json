@@ -19,7 +19,8 @@
     "verify:physics": "node scripts/verify-shot-physics.mjs",
     "verify:fielding": "node scripts/verify-fielding-sim.mjs",
     "verify:sfx": "node scripts/verify-sound-effects.mjs",
-    "verify:outcome": "node scripts/verify-shot-outcome.mjs"
+    "verify:outcome": "node scripts/verify-shot-outcome.mjs",
+    "verify:wagon": "node scripts/verify-wagon-wheel.mjs"
   },
   "dependencies": {
     "@google/genai": "1.37.0",

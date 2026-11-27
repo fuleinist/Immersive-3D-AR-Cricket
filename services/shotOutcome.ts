@@ -56,6 +56,8 @@ export interface ShotOutcomeDetail {
   runs: number;
   /** Fielding position that took the catch, or null. */
   caughtByLabel: string | null;
+  /** World-metres x/z of the landing or catch point. */
+  landingXZ: [number, number];
 }
 
 export interface ResolvedShot extends ShotOutcomeDetail {
@@ -99,6 +101,7 @@ export function resolveShot(
     runs: RUNS_BY_OUTCOME[fielding.outcome],
     caught,
     caughtByLabel: caught ? caughtByLabelFor(deliveryId, fielding.caughtById) : null,
+    landingXZ: [landingX, landingZ],
     distanceM: Math.hypot(landingX - contactPoint.x, landingZ - contactPoint.z),
     fielding,
   };

@@ -1,6 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { toBlob } from 'html-to-image';
 import { BallRecord, ShotResult } from '../types';
+import { WagonWheel } from './WagonWheel';
 
 interface ResultCardProps {
   history: BallRecord[];
@@ -124,12 +125,15 @@ export const ResultCard: React.FC<ResultCardProps> = ({ history, onPlayAgain }) 
         </div>
 
         <div className="flex items-end justify-between mt-6">
-          <div>
-            <div className="text-[10px] uppercase tracking-widest text-gray-500">Total</div>
-            <div className="text-5xl font-black font-mono text-yellow-400">
-              {totalRuns}
-              <span className="text-xl text-gray-400 font-normal"> / {wickets}w</span>
+          <div className="flex items-end gap-4">
+            <div>
+              <div className="text-[10px] uppercase tracking-widest text-gray-500">Total</div>
+              <div className="text-5xl font-black font-mono text-yellow-400">
+                {totalRuns}
+                <span className="text-xl text-gray-400 font-normal"> / {wickets}w</span>
+              </div>
             </div>
+            <WagonWheel history={history} />
           </div>
           <div className="text-right text-[10px] text-gray-600 uppercase tracking-widest">
             5 balls · {history.length - wickets} scoring shots
