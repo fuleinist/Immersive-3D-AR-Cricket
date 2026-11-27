@@ -21,7 +21,8 @@
     "verify:sfx": "node scripts/verify-sound-effects.mjs",
     "verify:outcome": "node scripts/verify-shot-outcome.mjs",
     "verify:wagon": "node scripts/verify-wagon-wheel.mjs",
-    "verify:stumps": "node scripts/verify-stumps.mjs"
+    "verify:stumps": "node scripts/verify-stumps.mjs",
+    "verify:juice": "node scripts/verify-impact-juice.mjs"
   },
   "dependencies": {
     "@google/genai": "1.37.0",

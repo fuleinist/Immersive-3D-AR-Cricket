@@ -4,6 +4,7 @@ import { Physics, usePlane } from '@react-three/cannon';
 import { Environment, PerspectiveCamera, ContactShadows } from '@react-three/drei';
 import { Avatar } from './Avatar';
 import { Ball } from './Ball';
+import { BallTrail } from './BallTrail';
 import { Stumps } from './Stumps';
 import { PoseLandmarkFrame, GameState, GameMode, ShotResult, Stance, DeliveryScript, ResolvedTrackingMode } from '../types';
 import {
@@ -13,6 +14,7 @@ import {
 import { resolveShot } from '../services/shotOutcome';
 import type { ShotOutcomeDetail } from '../services/shotOutcome';
 import { resolveStumpImpact, type StumpImpactState } from '../services/stumpImpact';
+import { BallTrail as BallTrailModel } from '../services/impactJuice';
 import { Vector3, Mesh } from 'three';
 
 interface SceneProps {
@@ -54,6 +56,10 @@ export const Scene: React.FC<SceneProps> = ({
   // holds the current state and a key that tells Stumps a new hit has landed.
   const [impact, setImpact] = useState<StumpImpactState | null>(null);
   const [impactKey, setImpactKey] = useState(0);
+
+  // The trail model lives for the match. Ball pushes into it per frame and
+  // BallTrail samples it, so neither component owns the buffer.
+  const trail = useMemo(() => new BallTrailModel(), []);
 
   const handleHit = (vel: Vector3, pos: Vector3) => {
     // The exit velocity is the true 3D velocity the swept collider produced, so
@@ -141,11 +147,16 @@ export const Scene: React.FC<SceneProps> = ({
             onBowled={handleBowled}
             resetTrigger={resetTrigger}
             batFrame={batFrame}
+            trail={trail}
         />
 
         <Stumps impact={impact} impactKey={impactKey} resetTrigger={resetTrigger} />
         <Pitch />
       </Physics>
+
+      {/* Flight path. Outside Physics: it is a display-only line and must not
+          add a body to the world. */}
+      <BallTrail trail={trail} resetTrigger={resetTrigger} />
 
       {/* Contact shadows re-render the whole scene from below every frame;
           256px is ample under blur=2 (was 512 — 4x the shadow-pass cost). */}
