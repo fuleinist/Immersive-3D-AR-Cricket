@@ -1,10 +1,12 @@
-import React, { useMemo, useState } from 'react';
-import { Canvas } from '@react-three/fiber';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { Physics, usePlane } from '@react-three/cannon';
 import { Environment, PerspectiveCamera, ContactShadows } from '@react-three/drei';
 import { Avatar } from './Avatar';
 import { Ball } from './Ball';
 import { BallTrail } from './BallTrail';
+import { CricketGround } from './CricketGround';
+import { Fielders } from './Fielders';
 import { Stumps } from './Stumps';
 import { PoseLandmarkFrame, GameState, GameMode, ShotResult, Stance, DeliveryScript, ResolvedTrackingMode } from '../types';
 import {
@@ -15,7 +17,22 @@ import { resolveShot } from '../services/shotOutcome';
 import type { ShotOutcomeDetail } from '../services/shotOutcome';
 import { resolveStumpImpact, type StumpImpactState } from '../services/stumpImpact';
 import { BallTrail as BallTrailModel } from '../services/impactJuice';
+import {
+  BASE_CAMERA,
+  FOLLOW_CAM_DURATION_S,
+  followCamPose,
+  type FollowCamPose,
+} from '../services/followCam';
 import { Vector3, Mesh } from 'three';
+
+interface FollowCamTrigger {
+  landingX: number;
+  landingZ: number;
+  startMs: number;
+}
+
+// Reused on every active frame by FollowCamRig so the render loop allocates nothing.
+const FOLLOW_CAM_POSE: FollowCamPose = { ...BASE_CAMERA };
 
 interface SceneProps {
   poseLandmarks: React.MutableRefObject<PoseLandmarkFrame | null>;
@@ -61,6 +78,10 @@ export const Scene: React.FC<SceneProps> = ({
   // BallTrail samples it, so neither component owns the buffer.
   const trail = useMemo(() => new BallTrailModel(), []);
 
+  // Boundary follow-cam trigger: populated only on FOUR/SIX during BATTING and
+  // cleared on completion, delivery reset, or leaving the batting phase.
+  const followCamRef = useRef<FollowCamTrigger | null>(null);
+
   const handleHit = (vel: Vector3, pos: Vector3) => {
     // The exit velocity is the true 3D velocity the swept collider produced, so
     // both the speed and the launch elevation are real numbers now (defect 2:
@@ -77,6 +98,17 @@ export const Scene: React.FC<SceneProps> = ({
     // a ball that hangs is caught. A touched ball is never a MISS: MISS now
     // means the ball beat the bat (see handleMiss).
     const shot = resolveShot(pos, vel, delivery.id);
+
+    if (
+      gameState === GameState.BATTING &&
+      (shot.result === ShotResult.FOUR || shot.result === ShotResult.SIX)
+    ) {
+      followCamRef.current = {
+        landingX: shot.landingXZ[0],
+        landingZ: shot.landingXZ[1],
+        startMs: performance.now(),
+      };
+    }
 
     // pos.z is where the ball met the bat on the pitch axis — used as a
     // shot-timing proxy by the coaching overlay (lower = further in front)
@@ -120,6 +152,11 @@ export const Scene: React.FC<SceneProps> = ({
       gl={{ alpha: true, antialias: true, stencil: false, powerPreference: 'high-performance' }}
     >
       <PerspectiveCamera makeDefault position={[0, 1.8, 6]} fov={45} />
+      <FollowCamRig
+        triggerRef={followCamRef}
+        resetTrigger={resetTrigger}
+        gameState={gameState}
+      />
       
       <ambientLight intensity={0.7} />
       <directionalLight position={[10, 15, 10]} intensity={2} castShadow shadow-mapSize={[1024, 1024]} />
@@ -154,6 +191,15 @@ export const Scene: React.FC<SceneProps> = ({
         <Pitch />
       </Physics>
 
+      {/* Visual-only cricket ground. Outside Physics: the invisible cannon
+          plane inside Pitch keeps the ground physics body unchanged. */}
+      <CricketGround />
+
+      {/* Visual-only fielders for the current delivery preset. Outside Physics:
+          fielding is resolved by services/fieldingSim.ts, so no rigid bodies
+          are created. */}
+      <Fielders deliveryId={delivery.id} />
+
       {/* Flight path. Outside Physics: it is a display-only line and must not
           add a body to the world. */}
       <BallTrail trail={trail} resetTrigger={resetTrigger} />
@@ -166,16 +212,76 @@ export const Scene: React.FC<SceneProps> = ({
 };
 
 const Pitch = () => {
-    const [ref] = usePlane(() => ({ 
-        rotation: [-Math.PI / 2, 0, 0],
-        position: [0, 0, 0],
-        material: { friction: 0.15, restitution: 0.65 }
-    }));
+  const [ref] = usePlane(() => ({
+    rotation: [-Math.PI / 2, 0, 0],
+    position: [0, 0, 0],
+    material: { friction: 0.15, restitution: 0.65 },
+  }));
 
-    return (
-        <mesh ref={ref as React.RefObject<Mesh>} receiveShadow>
-            <planeGeometry args={[30, 60]} />
-            <meshStandardMaterial color="#3d4a1d" roughness={0.8} />
-        </mesh>
-    )
+  return <mesh ref={ref as React.RefObject<Mesh>} visible={false} />;
+};
+
+interface FollowCamRigProps {
+  triggerRef: React.MutableRefObject<FollowCamTrigger | null>;
+  resetTrigger: number;
+  gameState: GameState;
 }
+
+const FollowCamRig: React.FC<FollowCamRigProps> = ({
+  triggerRef,
+  resetTrigger,
+  gameState,
+}) => {
+  const { camera } = useThree();
+  const hasMovedRef = useRef(false);
+
+  const restoreBase = () => {
+    camera.position.set(BASE_CAMERA.posX, BASE_CAMERA.posY, BASE_CAMERA.posZ);
+    camera.lookAt(BASE_CAMERA.targetX, BASE_CAMERA.targetY, BASE_CAMERA.targetZ);
+    hasMovedRef.current = false;
+  };
+
+  // New delivery: always clear any active follow-cam and return to base view.
+  useEffect(() => {
+    triggerRef.current = null;
+    if (hasMovedRef.current) restoreBase();
+  }, [resetTrigger, camera, triggerRef]);
+
+  // Leaving the batting phase (e.g. MENU or FINISHED): clear and restore base view.
+  useEffect(() => {
+    if (gameState !== GameState.BATTING) {
+      triggerRef.current = null;
+      if (hasMovedRef.current) restoreBase();
+    }
+  }, [gameState, camera, triggerRef]);
+
+  useFrame(() => {
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+
+    if (gameState !== GameState.BATTING) {
+      triggerRef.current = null;
+      if (hasMovedRef.current) restoreBase();
+      return;
+    }
+
+    const elapsedS = (performance.now() - trigger.startMs) / 1000;
+    const pose = followCamPose(
+      elapsedS,
+      trigger.landingX,
+      trigger.landingZ,
+      FOLLOW_CAM_POSE,
+    );
+    camera.position.set(pose.posX, pose.posY, pose.posZ);
+    camera.lookAt(pose.targetX, pose.targetY, pose.targetZ);
+
+    if (elapsedS >= FOLLOW_CAM_DURATION_S) {
+      triggerRef.current = null;
+      hasMovedRef.current = false;
+    } else {
+      hasMovedRef.current = true;
+    }
+  });
+
+  return null;
+};
