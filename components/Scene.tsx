@@ -6,6 +6,7 @@ import { Avatar } from './Avatar';
 import { Ball } from './Ball';
 import { BallTrail } from './BallTrail';
 import { CricketGround } from './CricketGround';
+import { Fielders } from './Fielders';
 import { Stumps } from './Stumps';
 import { PoseLandmarkFrame, GameState, GameMode, ShotResult, Stance, DeliveryScript, ResolvedTrackingMode } from '../types';
 import {
@@ -158,6 +159,11 @@ export const Scene: React.FC<SceneProps> = ({
       {/* Visual-only cricket ground. Outside Physics: the invisible cannon
           plane inside Pitch keeps the ground physics body unchanged. */}
       <CricketGround />
+
+      {/* Visual-only fielders for the current delivery preset. Outside Physics:
+          fielding is resolved by services/fieldingSim.ts, so no rigid bodies
+          are created. */}
+      <Fielders deliveryId={delivery.id} />
 
       {/* Flight path. Outside Physics: it is a display-only line and must not
           add a body to the world. */}

@@ -12,6 +12,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "verify:ground": "node scripts/verify-ground-layout.mjs",
+    "verify:fielders": "node scripts/verify-fielders.mjs",
     "verify:tracking": "node scripts/verify-tracking-mode.mjs",
     "verify:smoothing": "node scripts/verify-pose-smoothing.mjs",
     "verify:bat": "node scripts/verify-bat-orientation.mjs",
