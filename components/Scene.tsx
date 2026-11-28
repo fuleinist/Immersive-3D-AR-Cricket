@@ -5,6 +5,7 @@ import { Environment, PerspectiveCamera, ContactShadows } from '@react-three/dre
 import { Avatar } from './Avatar';
 import { Ball } from './Ball';
 import { BallTrail } from './BallTrail';
+import { CricketGround } from './CricketGround';
 import { Stumps } from './Stumps';
 import { PoseLandmarkFrame, GameState, GameMode, ShotResult, Stance, DeliveryScript, ResolvedTrackingMode } from '../types';
 import {
@@ -154,6 +155,10 @@ export const Scene: React.FC<SceneProps> = ({
         <Pitch />
       </Physics>
 
+      {/* Visual-only cricket ground. Outside Physics: the invisible cannon
+          plane inside Pitch keeps the ground physics body unchanged. */}
+      <CricketGround />
+
       {/* Flight path. Outside Physics: it is a display-only line and must not
           add a body to the world. */}
       <BallTrail trail={trail} resetTrigger={resetTrigger} />
@@ -166,16 +171,11 @@ export const Scene: React.FC<SceneProps> = ({
 };
 
 const Pitch = () => {
-    const [ref] = usePlane(() => ({ 
-        rotation: [-Math.PI / 2, 0, 0],
-        position: [0, 0, 0],
-        material: { friction: 0.15, restitution: 0.65 }
-    }));
+  const [ref] = usePlane(() => ({
+    rotation: [-Math.PI / 2, 0, 0],
+    position: [0, 0, 0],
+    material: { friction: 0.15, restitution: 0.65 },
+  }));
 
-    return (
-        <mesh ref={ref as React.RefObject<Mesh>} receiveShadow>
-            <planeGeometry args={[30, 60]} />
-            <meshStandardMaterial color="#3d4a1d" roughness={0.8} />
-        </mesh>
-    )
-}
+  return <mesh ref={ref as React.RefObject<Mesh>} visible={false} />;
+};
